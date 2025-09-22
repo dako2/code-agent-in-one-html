@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Code Companion</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script type="module">
+        import { GoogleGenAI, Type } from "https://esm.run/@google/genai";
+        window.GoogleGenAI = GoogleGenAI;
+        window.GeminiType = Type;
+    </script>
+    <style>
+        body {
+            background-color: #0D1117;
+            color: #C9D1D9;
+            font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
+            overflow: hidden;
+        }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #0D1117; }
+        ::-webkit-scrollbar-thumb { background: #2f81f780; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #2f81f7; }
+        .glowing-border { box-shadow: 0 0 5px #2f81f7, 0 0 10px #2f81f7, 0 0 15px #2f81f7; }
+        .ai-cursor { transition: transform 0.1s ease-out, width 0.3s ease-out, height 0.3s ease-out; }
+        .ai-cursor.loading { animation: pulse 1.5s infinite; }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); box-shadow: 0 0 5px #00ffff, 0 0 10px #00ffff; }
+            50% { transform: scale(1.1); box-shadow: 0 0 15px #00ffff, 0 0 25px #00ffff; }
+        }
+    </style>
+<link rel="stylesheet" href="/index.css">
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useCallback, useRef, StrictMode, Fragment } = React;
+        const { createRoot } = ReactDOM;
+        const { GoogleGenAI, GeminiType } = window;
+
+        // --- MOCK FILE SYSTEM API ---
+        const initialFileSystem = {
+          'src': {
+            'App.tsx': `import React from 'react';\n\nconst App = () => {\n  return <h1>Hello, AI Coder!</h1>;\n};\n\nexport default App;`,
+            'index.css': `body { margin: 0; }`,
+            'components': {}
+          },
+          'package.json': `{ "name": "ai-code-companion", "version": "1.0.0" }`
+        };
+
+        class FileSystem {
+            constructor() {
+                this.fs = this.loadFromLocalStorage();
+            }
+
+            loadFromLocalStorage() {
+                try {
+                    const savedFs = localStorage.getItem('ai_code_fs');
+                    if (savedFs) {
+                        return JSON.parse(savedFs);
+                    }
+                } catch (error) {
+                    console.error("Failed to load filesystem from localStorage", error);
+                }
+                return JSON.parse(JSON.stringify(initialFileSystem));
+            }
+
+            saveToLocalStorage() {
+                try {
+                    localStorage.setItem('ai_code_fs', JSON.stringify(this.fs));
+                } catch (error) {
+                    console.error("Failed to save filesystem to localStorage", error);
+                }
+            }
+            
+            reset() {
+                this.fs = JSON.parse(JSON.stringify(initialFileSystem));
+                this.saveToLocalStorage();
+            }
+            
+            _resolvePath(path, createMissing = false) {
+                const parts = path.split('/').filter(p => p);
+                let current = this.fs;
+                for (let i = 0; i < parts.length - 1; i++) {
+                    const part = parts[i];
+                    if (typeof current[part] !== 'object' || current[part] === null) {
+                        if (createMissing) {
+                            current[part] = {};
+                        } else {
+                            return null;
+                        }
+                    }
+                    current = current[part];
+                }
+                return { parent: current, key: parts[parts.length - 1] };
+            }
+
+            list(path) {
+                const parts = path.split('/').filter(p => p);
+                let current = this.fs;
+                if (path !== '/' && path !== '') {
+                   for (const part of parts) {
+                        if (typeof current[part] !== 'object' || current[part] === null) {
+                            return { success: false, error: `Path not found: ${path}` };
+                        }
+                        current = current[part];
+                    }
+                }
+
+                if (typeof current !== 'object') {
+                   return { success: false, error: `Path is not a directory: ${path}` };
+                }
+                
+                return {
+                    success: true,
+                    data: Object.keys(current).map(key => ({
+                        name: key,
+                        isDirectory: typeof current[key] === 'object' && current[key] !== null,
+                    })),
+                };
+            }
+
+            read(path) {
+                const resolved = this._resolvePath(path);
+                if (!resolved || typeof resolved.parent[resolved.key] !== 'string') {
+                    return { success: false, error: `File not found or is a directory: ${path}` };
+                }
+                return { success: true, data: resolved.parent[resolved.key] };
+            }
+
+            write(path, content, isUpdate = false) {
+                const resolved = this._resolvePath(path, !isUpdate);
+                 if (!resolved) {
+                    return { success: false, error: `Invalid path: ${path}` };
+                }
+
+                if (resolved.parent[resolved.key] !== undefined && !isUpdate) {
+                   return { success: false, error: `File already exists: ${path}` };
+                }
+                if (resolved.parent[resolved.key] === undefined && isUpdate) {
+                    return { success: false, error: `File does not exist: ${path}` };
+                }
+
+                resolved.parent[resolved.key] = content;
+                this.saveToLocalStorage();
+                return { success: true, data: `File ${isUpdate ? 'updated' : 'created'} successfully: ${path}` };
+            }
+        }
+        const fs = new FileSystem();
+        
+        // --- GEMINI SERVICE ---
+        const useGemini = () => {
+            const [ai, setAi] = useState(null);
+            useEffect(() => {
+                try {
+                    if (window.GoogleGenAI) {
+                        const genAI = new GoogleGenAI({ apiKey: "YOUR_API_KEY_HERE" /* IMPORTANT: Replace with process.env.API_KEY or secure method in a real app */ });
+                        setAi(genAI);
+                    }
+                } catch (e) {
+                    console.error("Error initializing Gemini API. Make sure API key is set.", e);
+                }
+            }, []);
+
+            const generateContent = async (prompt, existingHistory, onLog) => {
+                if (!ai) {
+                    onLog({ type: 'error', content: 'Gemini API not initialized.' });
+                    return { responseText: "Gemini API not initialized.", newHistory: existingHistory };
+                }
+
+                const model = "gemini-2.5-flash";
+                const systemInstruction = `You are an expert AI coding assistant.
+- You have access to a virtual file system.
+- Use the provided tools to interact with the file system to fulfill user requests.
+- When asked to create or modify code, use the file system tools.
+- Think step-by-step. For example, if asked to create a new component and use it, first create the file, then read the main app file, then update the main app file to import and use the new component.
+- Inform the user of the actions you have taken.`;
+
+                const tools = [{
+                    functionDeclarations: [
+                        { name: "list_files", description: "List files and directories at a given path.", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "The directory path to list. Use '/' for root." } }, required: ["path"] } },
+                        { name: "read_file", description: "Read the content of a file.", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "The path of the file to read." } }, required: ["path"] } },
+                        { name: "create_file", description: "Create a new file with content.", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "The full path for the new file (e.g., 'src/components/New.tsx')." }, content: { type: GeminiType.STRING, description: "The content to write into the file." } }, required: ["path", "content"] } },
+                        { name: "update_file", description: "Update an existing file with new content.", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "The path of the file to update." }, content: { type: GeminiType.STRING, description: "The new content to overwrite the file with." } }, required: ["path", "content"] } },
+                    ]
+                }];
+                
+                const history = [...existingHistory, { role: "user", parts: [{ text: prompt }] }];
+
+                try {
+                    for (let i = 0; i < 5; i++) { // Safety break after 5 tool calls
+                        const result = await ai.models.generateContent({
+                            model,
+                            contents: history,
+                            config: { systemInstruction, tools }
+                        });
+
+                        if (!result.candidates || result.candidates.length === 0) {
+                            onLog({ type: 'error', content: 'No response from AI.' });
+                            return { responseText: "Sorry, I couldn't generate a response.", newHistory: history };
+                        }
+                        
+                        const response = result;
+                        const content = response.candidates[0].content;
+                        history.push(content);
+
+                        const functionCall = content.parts.find(p => p.functionCall)?.functionCall;
+
+                        if (!functionCall) {
+                            const responseText = response.text || "Completed actions using tools. Check the file system for changes.";
+                            return { responseText, newHistory: history };
+                        }
+
+                        onLog({ type: 'tool', content: `Using tool: ${functionCall.name}(${JSON.stringify(functionCall.args)})` });
+
+                        let toolResult;
+                        const { name: functionName, args } = functionCall;
+
+                        if (functionName === 'list_files') {
+                            toolResult = fs.list(args.path);
+                        } else if (functionName === 'read_file') {
+                            toolResult = fs.read(args.path);
+                        } else if (functionName === 'create_file') {
+                            toolResult = fs.write(args.path, args.content);
+                        } else if (functionName === 'update_file') {
+                            toolResult = fs.write(args.path, args.content, true);
+                        } else {
+                            toolResult = { success: false, error: `Unknown tool: ${functionName}`};
+                        }
+
+                        onLog({ type: 'system', content: `Tool Result: ${JSON.stringify(toolResult)}` });
+                        
+                        history.push({
+                            role: 'tool',
+                            parts: [{ functionResponse: { name: functionName, response: toolResult } }]
+                        });
+                    }
+                   
+                    const responseText = "Reached maximum number of tool calls. Please check the logs and file system for the result of the operations.";
+                    return { responseText, newHistory: history };
+
+                } catch (error) {
+                    console.error("Error generating content:", error);
+                    onLog({ type: 'error', content: `An error occurred: ${error.message}` });
+                    return { responseText: `An error occurred: ${error.message}`, newHistory: existingHistory };
+                }
+            };
+            return { generateContent };
+        };
+
+        // --- HOOKS ---
+        const useMousePosition = () => {
+            const [position, setPosition] = useState({ x: 0, y: 0 });
+            useEffect(() => {
+                const setFromEvent = (e) => setPosition({ x: e.clientX, y: e.clientY });
+                window.addEventListener("mousemove", setFromEvent);
+                return () => window.removeEventListener("mousemove", setFromEvent);
+            }, []);
+            return position;
+        };
+        
+        // --- COMPONENTS ---
+        const CustomCursor = ({ loading }) => {
+            const { x, y } = useMousePosition();
+            const size = loading ? 40 : 20;
+            return (
+                <div 
+                    className={`ai-cursor fixed top-0 left-0 rounded-full border-2 border-cyan-400 pointer-events-none z-50 transition-all duration-200 ${loading ? 'loading' : ''}`}
+                    style={{ 
+                        transform: `translate(${x - size / 2}px, ${y - size / 2}px)`,
+                        width: `${size}px`,
+                        height: `${size}px`,
+                    }}
+                />
+            );
+        };
+
+        const FileExplorer = ({ onFileSelect, fileTree, onReset, onRefresh }) => {
+            const [tree, setTree] = useState(fileTree);
+            useEffect(() => setTree(fileTree), [fileTree]);
+
+            const renderTree = (node, path) => {
+                return Object.entries(node).map(([name, content]) => {
+                    const currentPath = path ? `${path}/${name}` : name;
+                    const isDirectory = typeof content === 'object' && content !== null;
+                    
+                    if (isDirectory) {
+                        return (
+                           <details key={currentPath} open className="pl-4">
+                               <summary className="cursor-pointer hover:text-cyan-400">{name}</summary>
+                               {renderTree(content, currentPath)}
+                           </details>
+                        );
+                    }
+                    return (
+                        <div key={currentPath} className="pl-4 cursor-pointer hover:text-cyan-400" onClick={() => onFileSelect(currentPath)}>
+                            {name}
+                        </div>
+                    );
+                });
+            };
+            
+            return (
+                 <div className="bg-[#010409] h-full flex flex-col">
+                    <div className="p-2 border-b border-gray-800 text-sm font-bold flex justify-between items-center">
+                        EXPLORER
+                         <div>
+                            <button onClick={onRefresh} className="mr-2 px-1 rounded hover:bg-gray-700" title="Refresh">🔄</button>
+                            <button onClick={onReset} className="px-1 rounded hover:bg-gray-700" title="Reset Filesystem">🗑️</button>
+                        </div>
+                    </div>
+                    <div className="p-2 text-sm flex-grow overflow-y-auto">{renderTree(tree, '')}</div>
+                </div>
+            )
+        };
+        
+        const Editor = ({ code, onCodeChange }) => {
+            return (
+                <textarea
+                    value={code}
+                    onChange={(e) => onCodeChange(e.target.value)}
+                    className="w-full h-full bg-[#0D1117] text-[#C9D1D9] font-mono text-sm p-4 resize-none focus:outline-none"
+                    spellCheck="false"
+                />
+            );
+        };
+
+        const Chatbox = ({ messages, onSendMessage, loading }) => {
+            const [input, setInput] = useState('');
+            const messagesEndRef = useRef(null);
+            
+            const handleSend = () => {
+                if(input.trim()){
+                    onSendMessage(input);
+                    setInput('');
+                }
+            };
+            
+            useEffect(() => {
+                messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            }, [messages]);
+
+            return (
+                <div className="bg-[#010409] h-full flex flex-col">
+                    <div className="p-2 border-b border-gray-800 text-sm font-bold">AI ASSISTANT</div>
+                    <div className="flex-grow p-2 overflow-y-auto text-sm space-y-4">
+                       {messages.map((msg, index) => (
+                           <div key={index} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                               <div className={`p-2 rounded-lg max-w-[80%] ${msg.role === 'user' ? 'bg-blue-800' : 'bg-gray-700'}`}>
+                                    <pre className="whitespace-pre-wrap font-sans">{msg.content}</pre>
+                               </div>
+                           </div>
+                       ))}
+                        {loading && <div className="text-cyan-400">Thinking...</div>}
+                        <div ref={messagesEndRef} />
+                    </div>
+                    <div className="p-2 border-t border-gray-800 flex">
+                        <input 
+                            type="text"
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            onKeyPress={(e) => e.key === 'Enter' && !loading && handleSend()}
+                            className="flex-grow bg-[#0D1117] border border-gray-700 rounded-l-md p-2 focus:outline-none focus:border-cyan-400 text-sm"
+                            placeholder="Ask the AI to do something..."
+                            disabled={loading}
+                        />
+                        <button onClick={handleSend} disabled={loading} className="bg-cyan-600 text-white p-2 rounded-r-md hover:bg-cyan-500 disabled:bg-gray-600">
+                            Send
+                        </button>
+                    </div>
+                </div>
+            )
+        };
+
+        const Logger = ({ logs }) => {
+            const logsEndRef = useRef(null);
+            useEffect(() => {
+                logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            }, [logs]);
+
+            const getColor = (type) => {
+                if (type === 'error') return 'text-red-500';
+                if (type === 'tool') return 'text-yellow-400';
+                if (type === 'system') return 'text-purple-400';
+                return 'text-gray-400';
+            };
+            
+            return (
+                <div className="bg-[#010409] h-full flex flex-col">
+                    <div className="p-2 border-b border-gray-800 text-sm font-bold">LOGS</div>
+                    <div className="flex-grow p-2 overflow-y-auto text-xs font-mono">
+                        {logs.map((log, index) => (
+                            <div key={index} className={getColor(log.type)}>
+                                <span className="font-bold mr-2">[{new Date().toLocaleTimeString()}]</span>
+                                <span>{log.content}</span>
+                            </div>
+                        ))}
+                        <div ref={logsEndRef} />
+                    </div>
+                </div>
+            );
+        };
+
+        // --- MAIN APP ---
+        const App = () => {
+            const [loading, setLoading] = useState(false);
+            const [fileSystemState, setFileSystemState] = useState(fs.fs);
+            const [tabs, setTabs] = useState([]);
+            const [activeTab, setActiveTab] = useState(null);
+            const [code, setCode] = useState('');
+            const [messages, setMessages] = useState([{role: 'ai', content: 'Hello! How can I help you code today?'}]);
+            const [logs, setLogs] = useState([]);
+            const [conversationHistory, setConversationHistory] = useState([]);
+            const { generateContent } = useGemini();
+
+            const refreshFileSystem = useCallback(() => {
+              setFileSystemState({...fs.fs});
+            }, []);
+
+            const handleLog = useCallback((log) => {
+                setLogs(prev => [...prev, log]);
+            }, []);
+
+            const handleFileSelect = useCallback((path) => {
+                if (!tabs.includes(path)) {
+                    setTabs(prev => [...prev, path]);
+                }
+                setActiveTab(path);
+                const fileContent = fs.read(path);
+                if(fileContent.success) {
+                    setCode(fileContent.data);
+                } else {
+                    handleLog({type: 'error', content: `Error reading file: ${fileContent.error}`})
+                }
+            }, [tabs, handleLog]);
+            
+            const handleCloseTab = (path) => {
+                const newTabs = tabs.filter(t => t !== path);
+                setTabs(newTabs);
+                if (activeTab === path) {
+                    if (newTabs.length > 0) {
+                        handleFileSelect(newTabs[0]);
+                    } else {
+                        setActiveTab(null);
+                        setCode('');
+                    }
+                }
+            };
+            
+            const handleCodeChange = (newCode) => {
+                setCode(newCode);
+                if(activeTab) {
+                    fs.write(activeTab, newCode, true);
+                    // No need to call refreshFileSystem here for performance, fs is source of truth
+                }
+            };
+
+            const handleResetFileSystem = () => {
+                if (window.confirm("Are you sure you want to reset the file system? All changes will be lost.")) {
+                    fs.reset();
+                    refreshFileSystem();
+                    setTabs([]);
+                    setActiveTab(null);
+                    setCode('');
+                    setConversationHistory([]); // Also reset conversation history
+                    setMessages([{role: 'ai', content: 'Hello! How can I help you code today?'}]);
+                    handleLog({type: 'system', content: 'File system has been reset.'});
+                }
+            };
+            
+            const handleSendMessage = useCallback(async (prompt) => {
+                setMessages(prev => [...prev, {role: 'user', content: prompt}]);
+                setLoading(true);
+                handleLog({type: 'info', content: `User prompt: "${prompt}"`});
+
+                const { responseText, newHistory } = await generateContent(prompt, conversationHistory, handleLog);
+                
+                if(responseText) {
+                    setMessages(prev => [...prev, {role: 'ai', content: responseText}]);
+                }
+                
+                if (newHistory) {
+                    setConversationHistory(newHistory);
+                }
+                
+                setLoading(false);
+                refreshFileSystem(); // Refresh FS view after AI operations
+            }, [generateContent, handleLog, refreshFileSystem, conversationHistory]);
+
+            return (
+                <Fragment>
+                    <CustomCursor loading={loading} />
+                    <div className="h-screen w-screen flex flex-col text-sm">
+                        {/* Main Content */}
+                        <div className="flex flex-grow overflow-hidden">
+                            {/* Left Panel */}
+                            <div className="w-1/5 min-w-[200px] border-r border-gray-800">
+                                <FileExplorer onFileSelect={handleFileSelect} fileTree={fileSystemState} onReset={handleResetFileSystem} onRefresh={refreshFileSystem}/>
+                            </div>
+
+                            {/* Center Panel */}
+                            <div className="w-3/5 flex flex-col">
+                                {/* Tabs */}
+                                {tabs.length > 0 && (
+                                    <div className="flex border-b border-gray-800 bg-[#010409]">
+                                    {tabs.map(tab => (
+                                        <div key={tab} className={`py-2 px-4 cursor-pointer text-xs ${activeTab === tab ? 'bg-[#0D1117] border-b-2 border-cyan-400' : 'text-gray-400'}`}
+                                            onClick={() => handleFileSelect(tab)}>
+                                            {tab.split('/').pop()}
+                                            <button className="ml-2 hover:text-white" onClick={(e) => { e.stopPropagation(); handleCloseTab(tab); }}>x</button>
+                                        </div>
+                                    ))}
+                                    </div>
+                                )}
+                                {/* Editor */}
+                                <div className="flex-grow">
+                                    <Editor code={code} onCodeChange={handleCodeChange} />
+                                </div>
+                            </div>
+                            
+                            {/* Right Panel */}
+                            <div className="w-1/5 min-w-[250px] border-l border-gray-800">
+                                <Chatbox messages={messages} onSendMessage={handleSendMessage} loading={loading} />
+                            </div>
+                        </div>
+
+                        {/* Bottom Panel */}
+                        <div className="h-1/4 min-h-[150px] border-t border-gray-800">
+                            <Logger logs={logs} />
+                        </div>
+                    </div>
+                </Fragment>
+            );
+        };
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<StrictMode><App /></StrictMode>);
+    </script>
+<script type="module" src="/index.tsx"></script>
+</body>
+</html>
