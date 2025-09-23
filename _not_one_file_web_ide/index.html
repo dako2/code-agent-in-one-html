@@ -153,12 +153,13 @@
         const fs = new FileSystem();
         
         // --- GEMINI SERVICE ---
+        // We'll define the service inline for now to avoid async import issues
         const useGemini = () => {
             const [ai, setAi] = useState(null);
             useEffect(() => {
                 try {
                     if (window.GoogleGenAI) {
-                        const genAI = new GoogleGenAI({ apiKey: "YOUR_API_KEY_HERE" /* IMPORTANT: Replace with process.env.API_KEY or secure method in a real app */ });
+                        const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "YOUR_API_KEY_HERE" });
                         setAi(genAI);
                     }
                 } catch (e) {
