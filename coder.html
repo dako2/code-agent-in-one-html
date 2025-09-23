@@ -27,7 +27,7 @@
         ::-webkit-scrollbar-thumb:hover { background: #2f81f7; }
         .glowing-border { box-shadow: 0 0 5px #2f81f7, 0 0 10px #2f81f7, 0 0 15px #2f81f7; }
     </style>
-<link rel="stylesheet" href="/index.css">
+<!-- Removed stale /index.css link -->
 </head>
 <body>
     <div id="root"></div>
@@ -639,8 +639,18 @@
             useEffect(() => {
                 try {
                     if (window.GoogleGenAI) {
-                        const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "YOUR_API_KEY_HERE" });
-                        setAi(genAI);
+                        let apiKey = '';
+                        try { apiKey = (sessionStorage.getItem('g_api_key') || '').trim(); } catch {}
+                        if (!apiKey) {
+                            apiKey = (window.prompt('Enter your Google AI API Key') || '').trim();
+                            if (apiKey) { try { sessionStorage.setItem('g_api_key', apiKey); } catch {} }
+                        }
+                        if (apiKey) {
+                            const genAI = new GoogleGenAI({ apiKey });
+                            setAi(genAI);
+                        } else {
+                            console.error('Gemini API key missing. Set sessionStorage g_api_key.');
+                        }
                     }
                 } catch (e) {
                     console.error("Error initializing Gemini API. Make sure API key is set.", e);
@@ -1514,6 +1524,6 @@
         const root = createRoot(document.getElementById('root'));
         root.render(<StrictMode><App /></StrictMode>);
     </script>
-<script type="module" src="/index.tsx"></script>
+<!-- Removed stale /index.tsx reference -->
 </body>
 </html>
