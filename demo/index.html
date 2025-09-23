@@ -545,13 +545,17 @@
                         { name: "write_local_file", description: "Write content to a local file in the opened directory.", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "The relative path of the file to write (e.g., 'src/components/Button.tsx')." }, content: { type: GeminiType.STRING, description: "The content to write into the file." } }, required: ["path", "content"] } },
                         { name: "create_local_directory", description: "Create a new directory in the opened local directory.", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "The relative path of the directory to create (e.g., 'src/components')." } }, required: ["path"] } },
                         { name: "delete_local_file", description: "Delete a file from the opened local directory.", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "The relative path of the file to delete." } }, required: ["path"] } },
+                        { name: "read_text_file", description: "Read complete contents of a file as text with optional head/tail lines.", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "The path of the file to read." }, head: { type: GeminiType.NUMBER, description: "First N lines to read (optional)." }, tail: { type: GeminiType.NUMBER, description: "Last N lines to read (optional)." } }, required: ["path"] } },
+                        { name: "search_files", description: "Recursively search for files/directories that match patterns.", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "Starting directory path." }, pattern: { type: GeminiType.STRING, description: "Search pattern (glob-style)." }, excludePatterns: { type: GeminiType.ARRAY, description: "Exclude patterns (array of strings).", items: { type: GeminiType.STRING } } }, required: ["path", "pattern"] } },
+                        { name: "move_file", description: "Move or rename files and directories.", parameters: { type: GeminiType.OBJECT, properties: { source: { type: GeminiType.STRING, description: "Source file/directory path." }, destination: { type: GeminiType.STRING, description: "Destination path." } }, required: ["source", "destination"] } },
+                        { name: "get_file_info", description: "Get detailed file/directory metadata including size, dates, and permissions.", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "Path to the file or directory." } }, required: ["path"] } },
                     ]
                 }];
                 
                 const history = [...existingHistory, { role: "user", parts: [{ text: prompt }] }];
 
                 try {
-                    for (let i = 0; i < 5; i++) { // Safety break after 5 tool calls
+                    for (let i = 0; i < 15; i++) { // Safety break after 15 tool calls
                         const result = await ai.models.generateContent({
                             model,
                             contents: history,
@@ -618,6 +622,69 @@
                             // Delete file from local filesystem
                             const result = await localFS.deleteFile(args.path);
                             toolResult = result;
+                        } else if (functionName === 'read_text_file') {
+                            // Read file with optional head/tail lines
+                            const content = virtualMirror.getVirtualFile(args.path);
+                            if (content !== null) {
+                                let lines = content.split('\n');
+                                if (args.head) {
+                                    lines = lines.slice(0, args.head);
+                                } else if (args.tail) {
+                                    lines = lines.slice(-args.tail);
+                                }
+                                toolResult = { success: true, data: lines.join('\n') };
+                            } else {
+                                toolResult = { success: false, error: `File not found: ${args.path}` };
+                            }
+                        } else if (functionName === 'search_files') {
+                            // Search for files matching pattern
+                            const virtualStructure = virtualMirror.getVirtualStructure();
+                            const matches = [];
+                            const searchInStructure = (obj, currentPath = '') => {
+                                for (const [name, content] of Object.entries(obj)) {
+                                    const fullPath = currentPath ? `${currentPath}/${name}` : name;
+                                    if (typeof content === 'object' && content !== null) {
+                                        // Directory
+                                        searchInStructure(content, fullPath);
+                                    } else {
+                                        // File - check if matches pattern
+                                        if (name.includes(args.pattern) || fullPath.includes(args.pattern)) {
+                                            matches.push(fullPath);
+                                        }
+                                    }
+                                }
+                            };
+                            searchInStructure(virtualStructure);
+                            toolResult = { success: true, data: matches };
+                        } else if (functionName === 'move_file') {
+                            // Move/rename file
+                            const content = virtualMirror.getVirtualFile(args.source);
+                            if (content !== null) {
+                                // Remove from source
+                                virtualMirror.setVirtualFile(args.source, null);
+                                // Add to destination
+                                virtualMirror.setVirtualFile(args.destination, content);
+                                setFileSystemState(virtualMirror.getVirtualStructure());
+                                toolResult = { success: true, message: `File moved from ${args.source} to ${args.destination}` };
+                            } else {
+                                toolResult = { success: false, error: `Source file not found: ${args.source}` };
+                            }
+                        } else if (functionName === 'get_file_info') {
+                            // Get file metadata
+                            const content = virtualMirror.getVirtualFile(args.path);
+                            if (content !== null) {
+                                toolResult = { 
+                                    success: true, 
+                                    data: {
+                                        path: args.path,
+                                        size: content.length,
+                                        type: 'file',
+                                        exists: true
+                                    }
+                                };
+                            } else {
+                                toolResult = { success: false, error: `File not found: ${args.path}` };
+                            }
                         } else {
                             toolResult = { success: false, error: `Unknown tool: ${functionName}`};
                         }
@@ -630,7 +697,7 @@
                         });
                     }
                    
-                    const responseText = "Reached maximum number of tool calls. Please check the logs and file system for the result of the operations.";
+                    const responseText = "Tool interaction ended. If something is incomplete, ask me to continue.";
                     return { responseText, newHistory: history };
 
                 } catch (error) {
@@ -644,36 +711,92 @@
 
         // --- COMPONENTS ---
 
-        const FileExplorer = ({ onFileSelect, fileTree, onReset, onRefresh, onOpenLocalDirectory, isLocalMode, onSyncFromLocal, onSyncToLocal }) => {
+        const FileExplorer = ({ onFileSelect, fileTree, onReset, onRefresh, onOpenLocalDirectory, isLocalMode, onSyncFromLocal, onSyncToLocal, activePath, rootName }) => {
             const [tree, setTree] = useState(fileTree);
+            const [filter, setFilter] = useState('');
+            const [expanded, setExpanded] = useState(new Set());
             useEffect(() => setTree(fileTree), [fileTree]);
+
+            const toggleExpand = (path) => {
+                const next = new Set(expanded);
+                if (next.has(path)) next.delete(path); else next.add(path);
+                setExpanded(next);
+            };
+            const expandAll = () => {
+                const collect = (node, path = '', acc = new Set()) => {
+                    Object.entries(node).forEach(([name, content]) => {
+                        const p = path ? `${path}/${name}` : name;
+                        if (typeof content === 'object' && content !== null) {
+                            acc.add(p);
+                            collect(content, p, acc);
+                        }
+                    });
+                    return acc;
+                };
+                setExpanded(collect(tree));
+            };
+            const collapseAll = () => setExpanded(new Set());
+
+            const matchFilter = (name) => !filter || name.toLowerCase().includes(filter.toLowerCase());
 
             const renderTree = (node, path) => {
                 return Object.entries(node).map(([name, content]) => {
                     const currentPath = path ? `${path}/${name}` : name;
                     const isDirectory = typeof content === 'object' && content !== null;
-                    
+                    const depth = currentPath ? currentPath.split('/').length - 1 : 0;
+
                     if (isDirectory) {
+                        // If none of the children match filter, hide folder (unless name matches)
+                        const hasMatch = (obj) => {
+                            return Object.entries(obj).some(([n, c]) => {
+                                const cp = `${currentPath}/${n}`;
+                                if (typeof c === 'object' && c !== null) return hasMatch(c) || matchFilter(n);
+                                return matchFilter(n);
+                            });
+                        };
+                        if (!matchFilter(name) && !hasMatch(content)) return null;
+                        const isOpen = expanded.has(currentPath);
                         return (
-                           <details key={currentPath} open className="pl-4">
-                               <summary className="cursor-pointer hover:text-cyan-400">{name}</summary>
-                               {renderTree(content, currentPath)}
-                           </details>
+                           <div key={currentPath}>
+                               <div className="cursor-pointer hover:text-cyan-400 flex items-center" style={{ paddingLeft: depth * 12 }} onClick={() => toggleExpand(currentPath)}>
+                                   <span className="mr-1">{isOpen ? '📂' : '📁'}</span>
+                                   <span>{name}</span>
+                               </div>
+                               {isOpen && (
+                                   <div>
+                                       {renderTree(content, currentPath)}
+                                   </div>
+                               )}
+                           </div>
                         );
                     }
+                    if (!matchFilter(name)) return null;
+                    const isActive = activePath === currentPath;
                     return (
-                        <div key={currentPath} className="pl-4 cursor-pointer hover:text-cyan-400" onClick={() => onFileSelect(currentPath)}>
-                            {name}
+                        <div key={currentPath} className={`cursor-pointer flex items-center hover:text-cyan-400 ${isActive ? 'text-cyan-400' : ''}`} style={{ paddingLeft: depth * 12 + 16 }} onClick={() => onFileSelect(currentPath)}>
+                            <span className="mr-1">📄</span>
+                            <span>{name}</span>
                         </div>
                     );
                 });
             };
             
+            const breadcrumb = () => {
+                if (!activePath) return '—';
+                const parts = activePath.split('/');
+                return parts.map((p, i) => (
+                    <span key={i} className="text-xs text-gray-400">
+                        {i > 0 && <span className="mx-1">/</span>}
+                        <span>{p}</span>
+                    </span>
+                ));
+            };
+            
             return (
                  <div className="bg-[#010409] h-full flex flex-col">
                     <div className="p-2 border-b border-gray-800 text-sm font-bold flex justify-between items-center">
-                        EXPLORER
-                         <div>
+                        <span>EXPLORER <span className="ml-2 font-normal text-gray-400">{rootName || 'Workspace'}</span></span>
+                         <div className="flex items-center gap-1">
                             <button onClick={onOpenLocalDirectory} className="mr-2 px-1 rounded hover:bg-gray-700" title="Open Local Directory">📁</button>
                             {isLocalMode && (
                                 <>
@@ -685,11 +808,17 @@
                             <button onClick={onReset} className="px-1 rounded hover:bg-gray-700" title="Reset Filesystem">🗑️</button>
                         </div>
                     </div>
+                    <div className="p-2 border-b border-gray-800 flex items-center gap-2">
+                        <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter files..." className="w-full bg-[#0D1117] border border-gray-700 rounded p-1 text-xs focus:outline-none focus:border-cyan-400" />
+                        <button onClick={expandAll} className="px-1 rounded hover:bg-gray-700 text-xs" title="Expand all">➕</button>
+                        <button onClick={collapseAll} className="px-1 rounded hover:bg-gray-700 text-xs" title="Collapse all">➖</button>
+                    </div>
                     {isLocalMode && (
                         <div className="p-2 text-xs text-green-400 border-b border-gray-800 bg-green-900/20">
                             📁 Local directory loaded
                         </div>
                     )}
+                    <div className="px-2 py-1 text-xs text-gray-400 border-b border-gray-800 truncate">{breadcrumb()}</div>
                     <div className="p-2 text-sm flex-grow overflow-y-auto">{renderTree(tree, '')}</div>
                 </div>
             )
@@ -949,7 +1078,7 @@
                     }
                 } else {
                     // Fallback to virtual filesystem
-                    setFileSystemState({...fs.fs});
+              setFileSystemState({...fs.fs});
                 }
             }, [isLocalMode, handleLog]);
 
@@ -1003,14 +1132,14 @@
                 } else {
                     // Fall back to reading from local file system and update mirror
                     const fileContent = await localFS.readFile(path);
-                    if(fileContent.success) {
-                        setCode(fileContent.data);
+                if(fileContent.success) {
+                    setCode(fileContent.data);
                         // Update virtual mirror with local content
                         virtualMirror.setVirtualFile(path, fileContent.data);
                         handleLog({type: 'system', content: `File loaded from local: ${path} (${language})`});
-                    } else {
+                } else {
                         handleLog({type: 'error', content: `Error reading file: ${fileContent.message}`});
-                    }
+                }
                 }
             }, [tabs, handleLog, isLocalMode, getLanguageFromFile]);
             
@@ -1150,6 +1279,8 @@
                                     isLocalMode={isLocalMode}
                                     onSyncFromLocal={handleSyncFromLocal}
                                     onSyncToLocal={handleSyncToLocal}
+                                    activePath={activeTab}
+                                    rootName={isLocalMode && localFS.directoryHandle ? localFS.directoryHandle.name : 'Workspace'}
                                 />
                             </div>
 
