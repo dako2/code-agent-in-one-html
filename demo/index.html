@@ -37,6 +37,137 @@
         const { createRoot } = ReactDOM;
         const { GoogleGenAI, GeminiType } = window;
 
+        // Lightweight LlamaIndex-like Memory (extended: static, facts, vector-like retrieval)
+        class LIMemory {
+            constructor(options = {}) {
+                this.messages = [];
+                this.tokenLimit = options.tokenLimit || 12000; // rough char-based limit
+                this.shortTermRatio = options.shortTermTokenLimitRatio || 0.7;
+                // Long-term blocks
+                this.staticBlocks = Array.isArray(options.staticBlocks) ? options.staticBlocks : [];
+                this.maxFacts = options.maxFacts || 50;
+                this.facts = [];
+                this.enableVector = options.enableVector !== false;
+                this.vectorDocs = []; // { id, text }
+            }
+            // --- helpers ---
+            static _normalize(text) {
+                return (text || '').toLowerCase().replace(/[^a-z0-9\s_\-\.]/g, ' ').split(/\s+/).filter(Boolean);
+            }
+            _vectorAdd(text) {
+                if (!this.enableVector) return;
+                const id = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                this.vectorDocs.push({ id, text: text || '' });
+                // keep reasonable cap
+                if (this.vectorDocs.length > 500) this.vectorDocs.shift();
+            }
+            _vectorSearch(query, topK = 3) {
+                if (!this.enableVector || !query) return [];
+                const qTokens = LIMemory._normalize(query);
+                if (qTokens.length === 0) return [];
+                const scores = this.vectorDocs.map(doc => {
+                    const dTokens = LIMemory._normalize(doc.text);
+                    // simple overlap score
+                    const setD = new Set(dTokens);
+                    let score = 0;
+                    for (const t of qTokens) if (setD.has(t)) score += 1;
+                    return { id: doc.id, text: doc.text, score };
+                });
+                return scores.filter(s => s.score > 0).sort((a, b) => b.score - a.score).slice(0, topK);
+            }
+            _extractFacts(fromText) {
+                // extremely simple heuristic: keep "X is Y" or key-value style sentences
+                const text = fromText || '';
+                const sentences = text.split(/(?<=[\.\?!])\s+/);
+                for (const s of sentences) {
+                    if (/\b(is|are|was|were|has|have|uses)\b/i.test(s) && s.length <= 200) {
+                        this.facts.push(s.trim());
+                        if (this.facts.length > this.maxFacts) this.facts.shift();
+                    }
+                }
+            }
+            // --- API ---
+            add(message) {
+                // message: { role: 'user'|'assistant'|'system', content: string }
+                if (!message?.role) return;
+                const parts = [{ text: message.content ?? '' }];
+                const role = message.role === 'assistant' ? 'model' : message.role;
+                this.messages.push({ role, parts });
+                // update LT memory blocks
+                if (role === 'model') {
+                    const text = message.content || '';
+                    this._extractFacts(text);
+                    this._vectorAdd(text);
+                } else if (role === 'user') {
+                    this._vectorAdd(message.content || '');
+                }
+            }
+            get() { return [...this.messages]; }
+            getLLM({ tokenLimit } = {}) {
+                const limit = tokenLimit || this.tokenLimit;
+                const assembled = [];
+                // 1) static
+                if (this.staticBlocks.length) {
+                    assembled.push({ role: 'system', parts: [{ text: this.staticBlocks.join('\n') }] });
+                }
+                // 2) vector-retrieved context based on last user message
+                const lastUser = [...this.messages].reverse().find(m => m.role === 'user');
+                const query = lastUser?.parts?.map(p => p.text || '').join('') || '';
+                const vec = this._vectorSearch(query, 3);
+                if (vec.length) {
+                    assembled.push({ role: 'system', parts: [{ text: 'Relevant context:\n' + vec.map(v => `- ${v.text}`).join('\n') }] });
+                }
+                // 3) extracted facts (summarized list)
+                if (this.facts.length) {
+                    assembled.push({ role: 'system', parts: [{ text: 'Known facts:\n' + this.facts.map(f => `- ${f}`).join('\n') }] });
+                }
+                // 4) short-term history capped to remaining budget
+                let used = assembled.reduce((n, m) => n + (m.parts?.map(p => p.text || '').join('').length || 0), 0);
+                const remaining = Math.max(1000, limit - used); // keep at least small budget
+                let total = 0;
+                const acc = [];
+                for (let i = this.messages.length - 1; i >= 0; i--) {
+                    const m = this.messages[i];
+                    const text = (m.parts?.map(p => p.text || '').join('')) || '';
+                    total += text.length;
+                    if (total > remaining) break;
+                    acc.push(m);
+                }
+                acc.reverse().forEach(m => assembled.push(m));
+                return assembled;
+            }
+            snapshot() {
+                try {
+                    return JSON.stringify({
+                        messages: this.messages,
+                        staticBlocks: this.staticBlocks,
+                        facts: this.facts,
+                        vectorDocs: this.vectorDocs,
+                        tokenLimit: this.tokenLimit,
+                        shortTermRatio: this.shortTermRatio,
+                        maxFacts: this.maxFacts,
+                        enableVector: this.enableVector
+                    });
+                } catch { return '[]'; }
+            }
+            load(snapshot) {
+                try {
+                    const obj = JSON.parse(snapshot || '{}');
+                    if (obj && typeof obj === 'object') {
+                        this.messages = Array.isArray(obj.messages) ? obj.messages : [];
+                        this.staticBlocks = Array.isArray(obj.staticBlocks) ? obj.staticBlocks : [];
+                        this.facts = Array.isArray(obj.facts) ? obj.facts : [];
+                        this.vectorDocs = Array.isArray(obj.vectorDocs) ? obj.vectorDocs : [];
+                        this.tokenLimit = obj.tokenLimit || this.tokenLimit;
+                        this.shortTermRatio = obj.shortTermRatio || this.shortTermRatio;
+                        this.maxFacts = obj.maxFacts || this.maxFacts;
+                        this.enableVector = obj.enableVector !== false;
+                    }
+                } catch {}
+            }
+            clear() { this.messages = []; this.facts = []; this.vectorDocs = []; }
+        }
+
         // --- MOCK FILE SYSTEM API ---
         const initialFileSystem = {};
 
@@ -744,7 +875,7 @@
                     const currentPath = path ? `${path}/${name}` : name;
                     const isDirectory = typeof content === 'object' && content !== null;
                     const depth = currentPath ? currentPath.split('/').length - 1 : 0;
-
+                    
                     if (isDirectory) {
                         // If none of the children match filter, hide folder (unless name matches)
                         const hasMatch = (obj) => {
@@ -764,7 +895,7 @@
                                </div>
                                {isOpen && (
                                    <div>
-                                       {renderTree(content, currentPath)}
+                               {renderTree(content, currentPath)}
                                    </div>
                                )}
                            </div>
@@ -933,15 +1064,20 @@
             return <div ref={editorRef} className="w-full h-full" />;
         };
 
-        const Chatbox = ({ messages, onSendMessage, loading }) => {
+        const Chatbox = ({ messages, onSendMessage, loading, onMemoryClear, onMemoryExport, onMemoryImport }) => {
             const [input, setInput] = useState('');
             const messagesEndRef = useRef(null);
             
             const handleSend = () => {
-                if(input.trim()){
-                    onSendMessage(input);
-                    setInput('');
-                }
+                if (!input.trim() || loading) return;
+                onSendMessage(input.trim());
+                setInput('');
+            };
+            const handleImport = async () => {
+                try {
+                    const text = prompt('Paste memory snapshot JSON:');
+                    if (text != null) onMemoryImport?.(text);
+                } catch {}
             };
             
             useEffect(() => {
@@ -950,17 +1086,23 @@
 
             return (
                 <div className="bg-[#010409] h-full flex flex-col">
-                    <div className="p-2 border-b border-gray-800 text-sm font-bold">AI ASSISTANT</div>
-                    <div className="flex-grow p-2 overflow-y-auto text-sm space-y-4">
-                       {messages.map((msg, index) => (
-                           <div key={index} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                               <div className={`p-2 rounded-lg max-w-[80%] ${msg.role === 'user' ? 'bg-blue-800' : 'bg-gray-700'}`}>
+                    <div className="p-2 border-b border-gray-800 text-sm font-bold flex items-center justify-between">
+                        <span>CHAT</span>
+                        <div className="flex gap-2 text-xs">
+                            <button className="px-2 py-1 bg-gray-800 rounded hover:bg-gray-700" onClick={onMemoryExport}>Export</button>
+                            <button className="px-2 py-1 bg-gray-800 rounded hover:bg-gray-700" onClick={handleImport}>Import</button>
+                            <button className="px-2 py-1 bg-red-700 rounded hover:bg-red-600" onClick={onMemoryClear}>Clear</button>
+                        </div>
+                    </div>
+                    <div className="p-2 border-b border-gray-800 text-sm font-bold">MESSAGES</div>
+                    <div className="flex-1 overflow-y-auto p-2 space-y-2">
+                        {messages.map((msg, index) => (
+                            <div key={index} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                                <div className={`p-2 rounded-lg max-w-[80%] ${msg.role === 'user' ? 'bg-blue-800' : 'bg-gray-700'}`}>
                                     <pre className="whitespace-pre-wrap font-sans">{msg.content}</pre>
-                               </div>
-                           </div>
-                       ))}
-                        {loading && <div className="text-cyan-400">Thinking...</div>}
-                        <div ref={messagesEndRef} />
+                                </div>
+                            </div>
+                        ))}
                     </div>
                     <div className="p-2 border-t border-gray-800 flex">
                         <input 
@@ -1019,10 +1161,19 @@
             const [currentLanguage, setCurrentLanguage] = useState('javascript');
             const [messages, setMessages] = useState([{role: 'ai', content: 'Hello! How can I help you code today?'}]);
             const [logs, setLogs] = useState([]);
-            const [conversationHistory, setConversationHistory] = useState([]);
             const [isLocalMode, setIsLocalMode] = useState(false);
             const { generateContent } = useGemini(isLocalMode, setFileSystemState);
+            const memoryRef = useRef(new LIMemory({ tokenLimit: 12000, staticBlocks: [
+                'You are an expert coding assistant. Prefer creating files with write_local_file so they persist to disk.'
+            ], maxFacts: 50, enableVector: true }));
 
+            // Load memory from localStorage on mount
+            useEffect(() => {
+                try {
+                    const snap = localStorage.getItem('ai_memory_snapshot');
+                    if (snap) memoryRef.current.load(snap);
+                } catch {}
+            }, []);
 
             // Language detection based on file extension
             const getLanguageFromFile = (filename) => {
@@ -1174,7 +1325,7 @@
                     setTabs([]);
                     setActiveTab(null);
                     setCode('');
-                    setConversationHistory([]); // Also reset conversation history
+                    memoryRef.current.clear(); // Also reset conversation history
                     setMessages([{role: 'ai', content: 'Hello! How can I help you code today?'}]);
                     handleLog({type: 'system', content: 'File system has been reset.'});
                 }
@@ -1249,19 +1400,49 @@
                 setLoading(true);
                 handleLog({type: 'info', content: `User prompt: "${prompt}"`});
 
-                const { responseText, newHistory } = await generateContent(prompt, conversationHistory, handleLog);
+                // Add user message to memory, build trimmed history
+                memoryRef.current.add({ role: 'user', content: prompt });
+                const trimmedHistory = memoryRef.current.getLLM();
+                const { responseText } = await generateContent(prompt, trimmedHistory, handleLog);
                 
                 if(responseText) {
                     setMessages(prev => [...prev, {role: 'ai', content: responseText}]);
-                }
-                
-                if (newHistory) {
-                    setConversationHistory(newHistory);
+                    memoryRef.current.add({ role: 'assistant', content: responseText });
+                    try { localStorage.setItem('ai_memory_snapshot', memoryRef.current.snapshot()); } catch {}
                 }
                 
                 setLoading(false);
                 refreshFileSystem(); // Refresh FS view after AI operations
-            }, [generateContent, handleLog, refreshFileSystem, conversationHistory]);
+            }, [generateContent, handleLog, refreshFileSystem]);
+
+            // Memory menu handlers
+            const handleMemoryClear = useCallback(() => {
+                memoryRef.current.clear();
+                try { localStorage.removeItem('ai_memory_snapshot'); } catch {}
+                handleLog({ type: 'system', content: 'Memory cleared.' });
+            }, [handleLog]);
+            const handleMemoryExport = useCallback(() => {
+                try {
+                    const snap = memoryRef.current.snapshot();
+                    navigator.clipboard?.writeText(snap).then(() => {
+                        handleLog({ type: 'system', content: 'Memory snapshot copied to clipboard.' });
+                    }).catch(() => {
+                        // fallback prompt
+                        prompt('Copy memory snapshot JSON:', snap);
+                    });
+                } catch (e) {
+                    handleLog({ type: 'error', content: `Failed to export memory: ${e?.message || e}` });
+                }
+            }, [handleLog]);
+            const handleMemoryImport = useCallback((text) => {
+                try {
+                    memoryRef.current.load(text);
+                    localStorage.setItem('ai_memory_snapshot', memoryRef.current.snapshot());
+                    handleLog({ type: 'system', content: 'Memory snapshot imported.' });
+                } catch (e) {
+                    handleLog({ type: 'error', content: `Failed to import memory: ${e?.message || e}` });
+                }
+            }, [handleLog]);
 
             return (
                 <Fragment>
@@ -1310,7 +1491,14 @@
                             
                             {/* Right Panel */}
                             <div className="w-1/5 min-w-[250px] border-l border-gray-800">
-                                <Chatbox messages={messages} onSendMessage={handleSendMessage} loading={loading} />
+                                <Chatbox 
+                                    messages={messages} 
+                                    onSendMessage={handleSendMessage} 
+                                    loading={loading}
+                                    onMemoryClear={handleMemoryClear}
+                                    onMemoryExport={handleMemoryExport}
+                                    onMemoryImport={handleMemoryImport}
+                                />
                             </div>
                         </div>
 

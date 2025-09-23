@@ -9,11 +9,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
-
+    "node-pty": "^1.0.0",
+    "ws": "^8.18.3",
+    "wss": "^0.0.2"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
-    
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }
