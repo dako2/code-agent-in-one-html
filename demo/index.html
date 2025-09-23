@@ -108,18 +108,18 @@
                 const assembled = [];
                 // 1) static
                 if (this.staticBlocks.length) {
-                    assembled.push({ role: 'system', parts: [{ text: this.staticBlocks.join('\n') }] });
+                    assembled.push({ role: 'user', parts: [{ text: this.staticBlocks.join('\n') }] });
                 }
                 // 2) vector-retrieved context based on last user message
                 const lastUser = [...this.messages].reverse().find(m => m.role === 'user');
                 const query = lastUser?.parts?.map(p => p.text || '').join('') || '';
                 const vec = this._vectorSearch(query, 3);
                 if (vec.length) {
-                    assembled.push({ role: 'system', parts: [{ text: 'Relevant context:\n' + vec.map(v => `- ${v.text}`).join('\n') }] });
+                    assembled.push({ role: 'user', parts: [{ text: 'Relevant context:\n' + vec.map(v => `- ${v.text}`).join('\n') }] });
                 }
                 // 3) extracted facts (summarized list)
                 if (this.facts.length) {
-                    assembled.push({ role: 'system', parts: [{ text: 'Known facts:\n' + this.facts.map(f => `- ${f}`).join('\n') }] });
+                    assembled.push({ role: 'user', parts: [{ text: 'Known facts:\n' + this.facts.map(f => `- ${f}`).join('\n') }] });
                 }
                 // 4) short-term history capped to remaining budget
                 let used = assembled.reduce((n, m) => n + (m.parts?.map(p => p.text || '').join('').length || 0), 0);
@@ -1064,14 +1064,14 @@
             return <div ref={editorRef} className="w-full h-full" />;
         };
 
-        const Chatbox = ({ messages, onSendMessage, loading, onMemoryClear, onMemoryExport, onMemoryImport }) => {
+            const Chatbox = ({ messages, onSendMessage, loading, onMemoryClear, onMemoryExport, onMemoryImport }) => {
             const [input, setInput] = useState('');
             const messagesEndRef = useRef(null);
             
             const handleSend = () => {
                 if (!input.trim() || loading) return;
                 onSendMessage(input.trim());
-                setInput('');
+                    setInput('');
             };
             const handleImport = async () => {
                 try {
@@ -1096,13 +1096,13 @@
                     </div>
                     <div className="p-2 border-b border-gray-800 text-sm font-bold">MESSAGES</div>
                     <div className="flex-1 overflow-y-auto p-2 space-y-2">
-                        {messages.map((msg, index) => (
-                            <div key={index} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                                <div className={`p-2 rounded-lg max-w-[80%] ${msg.role === 'user' ? 'bg-blue-800' : 'bg-gray-700'}`}>
+                       {messages.map((msg, index) => (
+                           <div key={index} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                               <div className={`p-2 rounded-lg max-w-[80%] ${msg.role === 'user' ? 'bg-blue-800' : 'bg-gray-700'}`}>
                                     <pre className="whitespace-pre-wrap font-sans">{msg.content}</pre>
-                                </div>
-                            </div>
-                        ))}
+                               </div>
+                           </div>
+                       ))}
                     </div>
                     <div className="p-2 border-t border-gray-800 flex">
                         <input 
