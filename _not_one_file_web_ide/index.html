@@ -25,12 +25,6 @@
         ::-webkit-scrollbar-thumb { background: #2f81f780; border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: #2f81f7; }
         .glowing-border { box-shadow: 0 0 5px #2f81f7, 0 0 10px #2f81f7, 0 0 15px #2f81f7; }
-        .ai-cursor { transition: transform 0.1s ease-out, width 0.3s ease-out, height 0.3s ease-out; }
-        .ai-cursor.loading { animation: pulse 1.5s infinite; }
-        @keyframes pulse {
-            0%, 100% { transform: scale(1); box-shadow: 0 0 5px #00ffff, 0 0 10px #00ffff; }
-            50% { transform: scale(1.1); box-shadow: 0 0 15px #00ffff, 0 0 25px #00ffff; }
-        }
     </style>
 <link rel="stylesheet" href="/index.css">
 </head>
@@ -253,32 +247,7 @@
             return { generateContent };
         };
 
-        // --- HOOKS ---
-        const useMousePosition = () => {
-            const [position, setPosition] = useState({ x: 0, y: 0 });
-            useEffect(() => {
-                const setFromEvent = (e) => setPosition({ x: e.clientX, y: e.clientY });
-                window.addEventListener("mousemove", setFromEvent);
-                return () => window.removeEventListener("mousemove", setFromEvent);
-            }, []);
-            return position;
-        };
-        
         // --- COMPONENTS ---
-        const CustomCursor = ({ loading }) => {
-            const { x, y } = useMousePosition();
-            const size = loading ? 40 : 20;
-            return (
-                <div 
-                    className={`ai-cursor fixed top-0 left-0 rounded-full border-2 border-cyan-400 pointer-events-none z-50 transition-all duration-200 ${loading ? 'loading' : ''}`}
-                    style={{ 
-                        transform: `translate(${x - size / 2}px, ${y - size / 2}px)`,
-                        width: `${size}px`,
-                        height: `${size}px`,
-                    }}
-                />
-            );
-        };
 
         const FileExplorer = ({ onFileSelect, fileTree, onReset, onRefresh }) => {
             const [tree, setTree] = useState(fileTree);
@@ -494,7 +463,6 @@
 
             return (
                 <Fragment>
-                    <CustomCursor loading={loading} />
                     <div className="h-screen w-screen flex flex-col text-sm">
                         {/* Main Content */}
                         <div className="flex flex-grow overflow-hidden">
