@@ -1,0 +1,1200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Code Companion</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.47.0/min/vs/loader.min.js"></script>
+    <script type="module">
+        import { GoogleGenAI, Type } from "https://esm.run/@google/genai";
+        window.GoogleGenAI = GoogleGenAI;
+        window.GeminiType = Type;
+    </script>
+    <style>
+        body {
+            background-color: #0D1117;
+            color: #C9D1D9;
+            font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
+            overflow: hidden;
+        }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #0D1117; }
+        ::-webkit-scrollbar-thumb { background: #2f81f780; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #2f81f7; }
+        .glowing-border { box-shadow: 0 0 5px #2f81f7, 0 0 10px #2f81f7, 0 0 15px #2f81f7; }
+    </style>
+<link rel="stylesheet" href="/index.css">
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useCallback, useRef, StrictMode, Fragment } = React;
+        const { createRoot } = ReactDOM;
+        const { GoogleGenAI, GeminiType } = window;
+
+        // --- MOCK FILE SYSTEM API ---
+        const initialFileSystem = {};
+
+        // --- IndexedDB for remembering the last directory handle ---
+        const DB_NAME = 'editor-db', STORE = 'handles', KEY = 'dir';
+        const idbOpen = () => new Promise((res, rej) => {
+            const r = indexedDB.open(DB_NAME, 1);
+            r.onupgradeneeded = () => r.result.createObjectStore(STORE);
+            r.onsuccess = () => res(r.result);
+            r.onerror = () => rej(r.error);
+        });
+        const saveHandle = async (handle) => {
+            const db = await idbOpen();
+            await new Promise((res, rej) => {
+                const tx = db.transaction(STORE, 'readwrite');
+                tx.objectStore(STORE).put(handle, KEY);
+                tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+            });
+        };
+        const loadHandle = async () => {
+            const db = await idbOpen();
+            return await new Promise((res, rej) => {
+                const tx = db.transaction(STORE, 'readonly');
+                const req = tx.objectStore(STORE).get(KEY);
+                req.onsuccess = () => res(req.result || null);
+                req.onerror = () => rej(req.error);
+            });
+        };
+
+        // --- LOCAL FILE SYSTEM ACCESS API ---
+        class LocalFileSystem {
+            constructor() {
+                this.directoryHandle = null;
+                this.isLocalMode = false;
+            }
+
+            async openDirectory() {
+                try {
+                    if (!window.showDirectoryPicker) {
+                        throw new Error('File System Access API is not supported in this browser. Please use Chrome, Edge, or Opera.');
+                    }
+                    
+                    // Try to load the last directory handle as a hint
+                    const lastHandle = await loadHandle();
+                    this.directoryHandle = await window.showDirectoryPicker({
+                        id: 'my-editor-root',
+                        startIn: lastHandle || 'documents',
+                        mode: 'readwrite'
+                    });
+                    this.isLocalMode = true;
+                    
+                    // Save the handle for next time
+                    await saveHandle(this.directoryHandle);
+                    
+                    return { success: true, message: `Opened directory: ${this.directoryHandle.name}` };
+                } catch (error) {
+                    if (error.name === 'AbortError') {
+                        return { success: false, message: 'Directory selection cancelled' };
+                    }
+                    return { success: false, message: `Failed to open directory: ${error.message}` };
+                }
+            }
+
+            async loadDirectoryStructure() {
+                if (!this.directoryHandle) {
+                    return { success: false, message: 'No directory selected' };
+                }
+
+                try {
+                    const structure = await this._loadDirectory(this.directoryHandle);
+                    return { success: true, data: structure };
+                } catch (error) {
+                    return { success: false, message: `Failed to load directory: ${error.message}` };
+                }
+            }
+
+            async _loadDirectory(dirHandle, path = '') {
+                const result = {};
+                
+                for await (const [name, handle] of dirHandle.entries()) {
+                    // Skip hidden files and system files
+                    if (name.startsWith('.')) continue;
+                    
+                    if (handle.kind === 'file') {
+                        try {
+                            const file = await handle.getFile();
+                            const content = await file.text();
+                            result[name] = content;
+                        } catch (error) {
+                            // Skip files that can't be read as text
+                            result[name] = `[Binary file - ${name}]`;
+                        }
+                    } else if (handle.kind === 'directory') {
+                        result[name] = await this._loadDirectory(handle, `${path}/${name}`);
+                    }
+                }
+                
+                return result;
+            }
+
+            async readFile(filePath) {
+                if (!this.directoryHandle) {
+                    return { success: false, message: 'No directory selected' };
+                }
+
+                try {
+                    const pathParts = filePath.split('/').filter(p => p);
+                    let currentHandle = this.directoryHandle;
+                    
+                    // Navigate to the file's directory
+                    for (let i = 0; i < pathParts.length - 1; i++) {
+                        currentHandle = await currentHandle.getDirectoryHandle(pathParts[i]);
+                    }
+                    
+                    const fileName = pathParts[pathParts.length - 1];
+                    const fileHandle = await currentHandle.getFileHandle(fileName);
+                    const file = await fileHandle.getFile();
+                    const content = await file.text();
+                    
+                    return { success: true, data: content };
+                } catch (error) {
+                    return { success: false, message: `Failed to read file: ${error.message}` };
+                }
+            }
+
+            async writeFile(filePath, content) {
+                if (!this.directoryHandle) {
+                    return { success: false, message: 'No directory selected' };
+                }
+
+                try {
+                    const pathParts = filePath.split('/').filter(p => p);
+                    let currentHandle = this.directoryHandle;
+                    
+                    // Navigate to the file's directory, creating directories as needed
+                    for (let i = 0; i < pathParts.length - 1; i++) {
+                        try {
+                            currentHandle = await currentHandle.getDirectoryHandle(pathParts[i]);
+                        } catch (error) {
+                            // Directory doesn't exist, create it
+                            currentHandle = await currentHandle.getDirectoryHandle(pathParts[i], { create: true });
+                        }
+                    }
+                    
+                    const fileName = pathParts[pathParts.length - 1];
+                    const fileHandle = await currentHandle.getFileHandle(fileName, { create: true });
+                    const writable = await fileHandle.createWritable();
+                    await writable.write(content);
+                    await writable.close();
+                    
+                    return { success: true, message: `File saved: ${filePath}` };
+                } catch (error) {
+                    return { success: false, message: `Failed to write file: ${error.message}` };
+                }
+            }
+
+            async createFile(filePath, content = '') {
+                return await this.writeFile(filePath, content);
+            }
+
+            async createDirectory(dirPath) {
+                if (!this.directoryHandle) {
+                    return { success: false, message: 'No directory selected' };
+                }
+
+                try {
+                    const pathParts = dirPath.split('/').filter(p => p);
+                    let currentHandle = this.directoryHandle;
+                    
+                    for (const part of pathParts) {
+                        try {
+                            currentHandle = await currentHandle.getDirectoryHandle(part);
+                        } catch (error) {
+                            currentHandle = await currentHandle.getDirectoryHandle(part, { create: true });
+                        }
+                    }
+                    
+                    return { success: true, message: `Directory created: ${dirPath}` };
+                } catch (error) {
+                    return { success: false, message: `Failed to create directory: ${error.message}` };
+                }
+            }
+
+            async deleteFile(filePath) {
+                if (!this.directoryHandle) {
+                    return { success: false, message: 'No directory selected' };
+                }
+
+                try {
+                    const pathParts = filePath.split('/').filter(p => p);
+                    let currentHandle = this.directoryHandle;
+                    
+                    // Navigate to the file's directory
+                    for (let i = 0; i < pathParts.length - 1; i++) {
+                        currentHandle = await currentHandle.getDirectoryHandle(pathParts[i]);
+                    }
+                    
+                    const fileName = pathParts[pathParts.length - 1];
+                    await currentHandle.removeEntry(fileName);
+                    
+                    return { success: true, message: `File deleted: ${filePath}` };
+                } catch (error) {
+                    return { success: false, message: `Failed to delete file: ${error.message}` };
+                }
+            }
+
+            async deleteDirectory(dirPath) {
+                if (!this.directoryHandle) {
+                    return { success: false, message: 'No directory selected' };
+                }
+
+                try {
+                    const pathParts = dirPath.split('/').filter(p => p);
+                    let currentHandle = this.directoryHandle;
+                    
+                    // Navigate to the parent directory
+                    for (let i = 0; i < pathParts.length - 1; i++) {
+                        currentHandle = await currentHandle.getDirectoryHandle(pathParts[i]);
+                    }
+                    
+                    const dirName = pathParts[pathParts.length - 1];
+                    await currentHandle.removeEntry(dirName, { recursive: true });
+                    
+                    return { success: true, message: `Directory deleted: ${dirPath}` };
+                } catch (error) {
+                    return { success: false, message: `Failed to delete directory: ${error.message}` };
+                }
+            }
+
+            reset() {
+                this.directoryHandle = null;
+                this.isLocalMode = false;
+            }
+
+            isLocalFile(filePath) {
+                return this.isLocalMode && !filePath.startsWith('/');
+            }
+        }
+
+        const localFS = new LocalFileSystem();
+
+        // --- VIRTUAL MIRROR SYSTEM ---
+        class VirtualMirror {
+            constructor() {
+                this.mirror = {};
+                this.localToVirtual = new Map(); // Maps local paths to virtual paths
+                this.virtualToLocal = new Map(); // Maps virtual paths to local paths
+                this.changeHistory = [];
+                this.isMirroring = false;
+            }
+
+            // Create a virtual mirror of the local directory structure
+            async createMirror(localStructure, basePath = '') {
+                this.mirror = {};
+                this.localToVirtual.clear();
+                this.virtualToLocal.clear();
+                this.isMirroring = true;
+                
+                await this._mirrorDirectory(localStructure, basePath, '');
+                return { success: true, message: 'Virtual mirror created successfully' };
+            }
+
+            async _mirrorDirectory(localStructure, localPath, virtualPath) {
+                for (const [name, content] of Object.entries(localStructure)) {
+                    const currentLocalPath = localPath ? `${localPath}/${name}` : name;
+                    const currentVirtualPath = virtualPath ? `${virtualPath}/${name}` : name;
+                    
+                    // Map paths bidirectionally
+                    this.localToVirtual.set(currentLocalPath, currentVirtualPath);
+                    this.virtualToLocal.set(currentVirtualPath, currentLocalPath);
+                    
+                    if (typeof content === 'object' && content !== null) {
+                        // It's a directory
+                        if (!this.mirror[currentVirtualPath]) {
+                            this.mirror[currentVirtualPath] = {};
+                        }
+                        await this._mirrorDirectory(content, currentLocalPath, currentVirtualPath);
+                    } else {
+                        // It's a file
+                        this.mirror[currentVirtualPath] = content;
+                    }
+                }
+            }
+
+            // Sync changes from virtual to local
+            async syncToLocal() {
+                if (!this.isMirroring) return { success: false, message: 'No mirror active' };
+                
+                const changes = [];
+                for (const [virtualPath, content] of Object.entries(this.mirror)) {
+                    if (typeof content === 'string') { // It's a file
+                        const localPath = this.virtualToLocal.get(virtualPath);
+                        if (localPath) {
+                            try {
+                                const result = await localFS.writeFile(localPath, content);
+                                if (result.success) {
+                                    changes.push({ type: 'write', path: localPath, content });
+                                }
+                            } catch (error) {
+                                console.error(`Failed to sync ${localPath}:`, error);
+                            }
+                        }
+                    }
+                }
+                
+                this.changeHistory.push({
+                    timestamp: Date.now(),
+                    type: 'sync_to_local',
+                    changes: changes
+                });
+                
+                return { success: true, message: `Synced ${changes.length} files to local`, changes };
+            }
+
+            // Sync changes from local to virtual
+            async syncFromLocal() {
+                if (!this.isMirroring) return { success: false, message: 'No mirror active' };
+                
+                const structureResult = await localFS.loadDirectoryStructure();
+                if (structureResult.success) {
+                    await this.createMirror(structureResult.data);
+                    return { success: true, message: 'Synced from local to virtual' };
+                }
+                return { success: false, message: 'Failed to load local structure' };
+            }
+
+            // Get virtual file content
+            getVirtualFile(virtualPath) {
+                return this.mirror[virtualPath] || null;
+            }
+
+            // Set virtual file content
+            setVirtualFile(virtualPath, content) {
+                this.mirror[virtualPath] = content;
+                this.changeHistory.push({
+                    timestamp: Date.now(),
+                    type: 'virtual_change',
+                    path: virtualPath,
+                    content: content
+                });
+            }
+
+            // Get change history
+            getChangeHistory() {
+                return this.changeHistory;
+            }
+
+            // Reset mirror
+            reset() {
+                this.mirror = {};
+                this.localToVirtual.clear();
+                this.virtualToLocal.clear();
+                this.changeHistory = [];
+                this.isMirroring = false;
+            }
+
+            // Get virtual structure
+            getVirtualStructure() {
+                return this.mirror;
+            }
+        }
+
+        const virtualMirror = new VirtualMirror();
+
+        class FileSystem {
+            constructor() {
+                this.fs = this.loadFromLocalStorage();
+            }
+
+            loadFromLocalStorage() {
+                try {
+                    const savedFs = localStorage.getItem('ai_code_fs');
+                    if (savedFs) {
+                        return JSON.parse(savedFs);
+                    }
+                } catch (error) {
+                    console.error("Failed to load filesystem from localStorage", error);
+                }
+                return JSON.parse(JSON.stringify(initialFileSystem));
+            }
+
+            saveToLocalStorage() {
+                try {
+                    localStorage.setItem('ai_code_fs', JSON.stringify(this.fs));
+                } catch (error) {
+                    console.error("Failed to save filesystem to localStorage", error);
+                }
+            }
+            
+            reset() {
+                this.fs = JSON.parse(JSON.stringify(initialFileSystem));
+                this.saveToLocalStorage();
+            }
+            
+            _resolvePath(path, createMissing = false) {
+                const parts = path.split('/').filter(p => p);
+                let current = this.fs;
+                for (let i = 0; i < parts.length - 1; i++) {
+                    const part = parts[i];
+                    if (typeof current[part] !== 'object' || current[part] === null) {
+                        if (createMissing) {
+                            current[part] = {};
+                        } else {
+                            return null;
+                        }
+                    }
+                    current = current[part];
+                }
+                return { parent: current, key: parts[parts.length - 1] };
+            }
+
+            list(path) {
+                const parts = path.split('/').filter(p => p);
+                let current = this.fs;
+                if (path !== '/' && path !== '') {
+                   for (const part of parts) {
+                        if (typeof current[part] !== 'object' || current[part] === null) {
+                            return { success: false, error: `Path not found: ${path}` };
+                        }
+                        current = current[part];
+                    }
+                }
+
+                if (typeof current !== 'object') {
+                   return { success: false, error: `Path is not a directory: ${path}` };
+                }
+                
+                return {
+                    success: true,
+                    data: Object.keys(current).map(key => ({
+                        name: key,
+                        isDirectory: typeof current[key] === 'object' && current[key] !== null,
+                    })),
+                };
+            }
+
+            read(path) {
+                const resolved = this._resolvePath(path);
+                if (!resolved || typeof resolved.parent[resolved.key] !== 'string') {
+                    return { success: false, error: `File not found or is a directory: ${path}` };
+                }
+                return { success: true, data: resolved.parent[resolved.key] };
+            }
+
+            write(path, content, isUpdate = false) {
+                const resolved = this._resolvePath(path, !isUpdate);
+                 if (!resolved) {
+                    return { success: false, error: `Invalid path: ${path}` };
+                }
+
+                if (resolved.parent[resolved.key] !== undefined && !isUpdate) {
+                   return { success: false, error: `File already exists: ${path}` };
+                }
+                if (resolved.parent[resolved.key] === undefined && isUpdate) {
+                    return { success: false, error: `File does not exist: ${path}` };
+                }
+
+                resolved.parent[resolved.key] = content;
+                this.saveToLocalStorage();
+                return { success: true, data: `File ${isUpdate ? 'updated' : 'created'} successfully: ${path}` };
+            }
+        }
+        const fs = new FileSystem();
+        
+        // --- GEMINI SERVICE ---
+        // We'll define the service inline for now to avoid async import issues
+        const useGemini = (isLocalMode, setFileSystemState) => {
+            const [ai, setAi] = useState(null);
+            useEffect(() => {
+                try {
+                    if (window.GoogleGenAI) {
+                        const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "YOUR_API_KEY_HERE" });
+                        setAi(genAI);
+                    }
+                } catch (e) {
+                    console.error("Error initializing Gemini API. Make sure API key is set.", e);
+                }
+            }, []);
+
+            const generateContent = async (prompt, existingHistory, onLog) => {
+                if (!ai) {
+                    onLog({ type: 'error', content: 'Gemini API not initialized.' });
+                    return { responseText: "Gemini API not initialized.", newHistory: existingHistory };
+                }
+
+                const model = "gemini-2.5-flash";
+                const systemInstruction = `You are an expert AI coding assistant.
+- You work with the user's local filesystem through a virtual mirror system.
+- IMPORTANT: When creating or updating files, ALWAYS use write_local_file to ensure files are actually saved to the local filesystem.
+- Use read_file, list_files for reading operations.
+- Use write_local_file for creating new files or updating existing files.
+- Use create_local_directory for creating directories.
+- Use delete_local_file for deleting files.
+- Think step-by-step. For example, if asked to create a new component and use it, first create the file with write_local_file, then read the main app file, then update the main app file to import and use the new component.
+- Always inform the user of the actions you have taken.
+- When writing files, use relative paths from the opened directory root.
+- Be careful with file operations - always check if files exist before modifying them.
+- All changes are automatically tracked and synced to the local filesystem.`;
+
+                const tools = [{
+                    functionDeclarations: [
+                        { name: "list_files", description: "List files and directories at a given path.", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "The directory path to list. Use '/' for root." } }, required: ["path"] } },
+                        { name: "read_file", description: "Read the content of a file.", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "The path of the file to read." } }, required: ["path"] } },
+                        { name: "create_file", description: "DEPRECATED: Use write_local_file instead. Create a new file with content (virtual only).", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "The full path for the new file (e.g., 'src/components/New.tsx')." }, content: { type: GeminiType.STRING, description: "The content to write into the file." } }, required: ["path", "content"] } },
+                        { name: "update_file", description: "DEPRECATED: Use write_local_file instead. Update an existing file with new content (virtual only).", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "The path of the file to update." }, content: { type: GeminiType.STRING, description: "The new content to overwrite the file with." } }, required: ["path", "content"] } },
+                        { name: "write_local_file", description: "Write content to a local file in the opened directory.", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "The relative path of the file to write (e.g., 'src/components/Button.tsx')." }, content: { type: GeminiType.STRING, description: "The content to write into the file." } }, required: ["path", "content"] } },
+                        { name: "create_local_directory", description: "Create a new directory in the opened local directory.", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "The relative path of the directory to create (e.g., 'src/components')." } }, required: ["path"] } },
+                        { name: "delete_local_file", description: "Delete a file from the opened local directory.", parameters: { type: GeminiType.OBJECT, properties: { path: { type: GeminiType.STRING, description: "The relative path of the file to delete." } }, required: ["path"] } },
+                    ]
+                }];
+                
+                const history = [...existingHistory, { role: "user", parts: [{ text: prompt }] }];
+
+                try {
+                    for (let i = 0; i < 5; i++) { // Safety break after 5 tool calls
+                        const result = await ai.models.generateContent({
+                            model,
+                            contents: history,
+                            config: { systemInstruction, tools }
+                        });
+
+                        if (!result.candidates || result.candidates.length === 0) {
+                            onLog({ type: 'error', content: 'No response from AI.' });
+                            return { responseText: "Sorry, I couldn't generate a response.", newHistory: history };
+                        }
+                        
+                        const response = result;
+                        const content = response.candidates[0].content;
+                        history.push(content);
+
+                        const functionCall = content.parts.find(p => p.functionCall)?.functionCall;
+
+                        if (!functionCall) {
+                            const responseText = response.text || "Completed actions using tools. Check the file system for changes.";
+                            return { responseText, newHistory: history };
+                        }
+
+                        onLog({ type: 'tool', content: `Using tool: ${functionCall.name}(${JSON.stringify(functionCall.args)})` });
+
+                        let toolResult;
+                        const { name: functionName, args } = functionCall;
+
+                        if (functionName === 'list_files') {
+                            // Always use virtual mirror when local directory is open
+                            const virtualStructure = virtualMirror.getVirtualStructure();
+                            toolResult = { success: true, data: Object.keys(virtualStructure).map(key => ({
+                                name: key,
+                                isDirectory: typeof virtualStructure[key] === 'object' && virtualStructure[key] !== null,
+                            })) };
+                        } else if (functionName === 'read_file') {
+                            // Always read from virtual mirror
+                            const content = virtualMirror.getVirtualFile(args.path);
+                            if (content !== null) {
+                                toolResult = { success: true, data: content };
+                            } else {
+                                toolResult = { success: false, error: `File not found: ${args.path}` };
+                            }
+                        } else if (functionName === 'create_file') {
+                            // Always create in virtual mirror
+                            virtualMirror.setVirtualFile(args.path, args.content);
+                            // Update the file system state to reflect changes
+                            setFileSystemState(virtualMirror.getVirtualStructure());
+                            toolResult = { success: true, message: `File created: ${args.path}` };
+                        } else if (functionName === 'update_file') {
+                            // Always update in virtual mirror
+                            virtualMirror.setVirtualFile(args.path, args.content);
+                            // Update the file system state to reflect changes
+                            setFileSystemState(virtualMirror.getVirtualStructure());
+                            toolResult = { success: true, message: `File updated: ${args.path}` };
+                        } else if (functionName === 'write_local_file') {
+                            // Write to local filesystem
+                            const result = await localFS.writeFile(args.path, args.content);
+                            toolResult = result;
+                        } else if (functionName === 'create_local_directory') {
+                            // Create directory in local filesystem
+                            const result = await localFS.createDirectory(args.path);
+                            toolResult = result;
+                        } else if (functionName === 'delete_local_file') {
+                            // Delete file from local filesystem
+                            const result = await localFS.deleteFile(args.path);
+                            toolResult = result;
+                        } else {
+                            toolResult = { success: false, error: `Unknown tool: ${functionName}`};
+                        }
+
+                        onLog({ type: 'system', content: `Tool Result: ${JSON.stringify(toolResult)}` });
+                        
+                        history.push({
+                            role: 'tool',
+                            parts: [{ functionResponse: { name: functionName, response: toolResult } }]
+                        });
+                    }
+                   
+                    const responseText = "Reached maximum number of tool calls. Please check the logs and file system for the result of the operations.";
+                    return { responseText, newHistory: history };
+
+                } catch (error) {
+                    console.error("Error generating content:", error);
+                    onLog({ type: 'error', content: `An error occurred: ${error.message}` });
+                    return { responseText: `An error occurred: ${error.message}`, newHistory: existingHistory };
+                }
+            };
+            return { generateContent };
+        };
+
+        // --- COMPONENTS ---
+
+        const FileExplorer = ({ onFileSelect, fileTree, onReset, onRefresh, onOpenLocalDirectory, isLocalMode, onSyncFromLocal, onSyncToLocal }) => {
+            const [tree, setTree] = useState(fileTree);
+            useEffect(() => setTree(fileTree), [fileTree]);
+
+            const renderTree = (node, path) => {
+                return Object.entries(node).map(([name, content]) => {
+                    const currentPath = path ? `${path}/${name}` : name;
+                    const isDirectory = typeof content === 'object' && content !== null;
+                    
+                    if (isDirectory) {
+                        return (
+                           <details key={currentPath} open className="pl-4">
+                               <summary className="cursor-pointer hover:text-cyan-400">{name}</summary>
+                               {renderTree(content, currentPath)}
+                           </details>
+                        );
+                    }
+                    return (
+                        <div key={currentPath} className="pl-4 cursor-pointer hover:text-cyan-400" onClick={() => onFileSelect(currentPath)}>
+                            {name}
+                        </div>
+                    );
+                });
+            };
+            
+            return (
+                 <div className="bg-[#010409] h-full flex flex-col">
+                    <div className="p-2 border-b border-gray-800 text-sm font-bold flex justify-between items-center">
+                        EXPLORER
+                         <div>
+                            <button onClick={onOpenLocalDirectory} className="mr-2 px-1 rounded hover:bg-gray-700" title="Open Local Directory">📁</button>
+                            {isLocalMode && (
+                                <>
+                                    <button onClick={onSyncFromLocal} className="mr-2 px-1 rounded hover:bg-gray-700" title="Sync From Local">⬇️</button>
+                                    <button onClick={onSyncToLocal} className="mr-2 px-1 rounded hover:bg-gray-700" title="Sync To Local">⬆️</button>
+                                </>
+                            )}
+                            <button onClick={onRefresh} className="mr-2 px-1 rounded hover:bg-gray-700" title="Refresh">🔄</button>
+                            <button onClick={onReset} className="px-1 rounded hover:bg-gray-700" title="Reset Filesystem">🗑️</button>
+                        </div>
+                    </div>
+                    {isLocalMode && (
+                        <div className="p-2 text-xs text-green-400 border-b border-gray-800 bg-green-900/20">
+                            📁 Local directory loaded
+                        </div>
+                    )}
+                    <div className="p-2 text-sm flex-grow overflow-y-auto">{renderTree(tree, '')}</div>
+                </div>
+            )
+        };
+        
+        const Editor = ({ code, onCodeChange, language = 'javascript' }) => {
+            const editorRef = useRef(null);
+            const monacoRef = useRef(null);
+
+            useEffect(() => {
+                if (!editorRef.current) return;
+
+                // Configure Monaco loader
+                require.config({ 
+                    paths: { 
+                        'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.47.0/min/vs' 
+                    } 
+                });
+
+                // Load Monaco Editor
+                require(['vs/editor/editor.main'], function () {
+                    if (monacoRef.current) {
+                        monacoRef.current.dispose();
+                    }
+
+                    monacoRef.current = monaco.editor.create(editorRef.current, {
+                        value: code || '',
+                        language: language,
+                        theme: 'vs-dark',
+                        automaticLayout: true,
+                        minimap: { enabled: false },
+                        fontSize: 14,
+                        lineNumbers: 'on',
+                        roundedSelection: false,
+                        scrollBeyondLastLine: false,
+                        readOnly: false,
+                        cursorStyle: 'line',
+                        wordWrap: 'on',
+                        folding: true,
+                        lineDecorationsWidth: 10,
+                        lineNumbersMinChars: 3,
+                        renderLineHighlight: 'line',
+                        selectOnLineNumbers: true,
+                        glyphMargin: true,
+                        contextmenu: true,
+                        mouseWheelZoom: true,
+                        smoothScrolling: true,
+                        cursorBlinking: 'blink',
+                        cursorSmoothCaretAnimation: true,
+                        padding: { top: 16, bottom: 16 },
+                        scrollbar: {
+                            vertical: 'auto',
+                            horizontal: 'auto',
+                            useShadows: false,
+                            verticalHasArrows: false,
+                            horizontalHasArrows: false,
+                            verticalScrollbarSize: 8,
+                            horizontalScrollbarSize: 8
+                        },
+                        // Additional features
+                        suggestOnTriggerCharacters: true,
+                        acceptSuggestionOnEnter: 'on',
+                        tabCompletion: 'on',
+                        wordBasedSuggestions: 'matchingDocuments',
+                        parameterHints: { enabled: true },
+                        hover: { enabled: true },
+                        lightbulb: { enabled: true },
+                        codeLens: true,
+                        formatOnPaste: true,
+                        formatOnType: true,
+                        bracketPairColorization: { enabled: true },
+                        guides: {
+                            bracketPairs: true,
+                            indentation: true
+                        },
+                        // Keyboard shortcuts
+                        multiCursorModifier: 'ctrlCmd',
+                        accessibilitySupport: 'auto'
+                    });
+
+                    // Listen for content changes
+                    monacoRef.current.onDidChangeModelContent(() => {
+                        const newValue = monacoRef.current.getValue();
+                        onCodeChange(newValue);
+                    });
+                });
+
+                return () => {
+                    if (monacoRef.current) {
+                        monacoRef.current.dispose();
+                    }
+                };
+            }, []);
+
+            // Update editor content when code prop changes
+            useEffect(() => {
+                if (monacoRef.current && monacoRef.current.getValue() !== code) {
+                    monacoRef.current.setValue(code || '');
+                }
+            }, [code]);
+
+            // Update language when it changes
+            useEffect(() => {
+                if (monacoRef.current) {
+                    const model = monacoRef.current.getModel();
+                    if (model) {
+                        monaco.editor.setModelLanguage(model, language);
+                    }
+                }
+            }, [language]);
+
+            return <div ref={editorRef} className="w-full h-full" />;
+        };
+
+        const Chatbox = ({ messages, onSendMessage, loading }) => {
+            const [input, setInput] = useState('');
+            const messagesEndRef = useRef(null);
+            
+            const handleSend = () => {
+                if(input.trim()){
+                    onSendMessage(input);
+                    setInput('');
+                }
+            };
+            
+            useEffect(() => {
+                messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            }, [messages]);
+
+            return (
+                <div className="bg-[#010409] h-full flex flex-col">
+                    <div className="p-2 border-b border-gray-800 text-sm font-bold">AI ASSISTANT</div>
+                    <div className="flex-grow p-2 overflow-y-auto text-sm space-y-4">
+                       {messages.map((msg, index) => (
+                           <div key={index} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                               <div className={`p-2 rounded-lg max-w-[80%] ${msg.role === 'user' ? 'bg-blue-800' : 'bg-gray-700'}`}>
+                                    <pre className="whitespace-pre-wrap font-sans">{msg.content}</pre>
+                               </div>
+                           </div>
+                       ))}
+                        {loading && <div className="text-cyan-400">Thinking...</div>}
+                        <div ref={messagesEndRef} />
+                    </div>
+                    <div className="p-2 border-t border-gray-800 flex">
+                        <input 
+                            type="text"
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            onKeyPress={(e) => e.key === 'Enter' && !loading && handleSend()}
+                            className="flex-grow bg-[#0D1117] border border-gray-700 rounded-l-md p-2 focus:outline-none focus:border-cyan-400 text-sm"
+                            placeholder="Ask the AI to do something..."
+                            disabled={loading}
+                        />
+                        <button onClick={handleSend} disabled={loading} className="bg-cyan-600 text-white p-2 rounded-r-md hover:bg-cyan-500 disabled:bg-gray-600">
+                            Send
+                        </button>
+                    </div>
+                </div>
+            )
+        };
+
+        const Logger = ({ logs }) => {
+            const logsEndRef = useRef(null);
+            useEffect(() => {
+                logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            }, [logs]);
+
+            const getColor = (type) => {
+                if (type === 'error') return 'text-red-500';
+                if (type === 'tool') return 'text-yellow-400';
+                if (type === 'system') return 'text-purple-400';
+                return 'text-gray-400';
+            };
+            
+            return (
+                <div className="bg-[#010409] h-full flex flex-col">
+                    <div className="p-2 border-b border-gray-800 text-sm font-bold">LOGS</div>
+                    <div className="flex-grow p-2 overflow-y-auto text-xs font-mono">
+                        {logs.map((log, index) => (
+                            <div key={index} className={getColor(log.type)}>
+                                <span className="font-bold mr-2">[{new Date().toLocaleTimeString()}]</span>
+                                <span>{log.content}</span>
+                            </div>
+                        ))}
+                        <div ref={logsEndRef} />
+                    </div>
+                </div>
+            );
+        };
+
+        // --- MAIN APP ---
+        const App = () => {
+            const [loading, setLoading] = useState(false);
+            const [fileSystemState, setFileSystemState] = useState(fs.fs);
+            const [tabs, setTabs] = useState([]);
+            const [activeTab, setActiveTab] = useState(null);
+            const [code, setCode] = useState('');
+            const [currentLanguage, setCurrentLanguage] = useState('javascript');
+            const [messages, setMessages] = useState([{role: 'ai', content: 'Hello! How can I help you code today?'}]);
+            const [logs, setLogs] = useState([]);
+            const [conversationHistory, setConversationHistory] = useState([]);
+            const [isLocalMode, setIsLocalMode] = useState(false);
+            const { generateContent } = useGemini(isLocalMode, setFileSystemState);
+
+
+            // Language detection based on file extension
+            const getLanguageFromFile = (filename) => {
+                if (!filename) return 'javascript';
+                const ext = filename.split('.').pop().toLowerCase();
+                const languageMap = {
+                    'js': 'javascript',
+                    'jsx': 'javascript',
+                    'ts': 'typescript',
+                    'tsx': 'typescript',
+                    'py': 'python',
+                    'java': 'java',
+                    'cpp': 'cpp',
+                    'c': 'c',
+                    'cs': 'csharp',
+                    'php': 'php',
+                    'rb': 'ruby',
+                    'go': 'go',
+                    'rs': 'rust',
+                    'html': 'html',
+                    'css': 'css',
+                    'scss': 'scss',
+                    'sass': 'sass',
+                    'less': 'less',
+                    'json': 'json',
+                    'xml': 'xml',
+                    'yaml': 'yaml',
+                    'yml': 'yaml',
+                    'md': 'markdown',
+                    'sql': 'sql',
+                    'sh': 'shell',
+                    'bash': 'shell',
+                    'zsh': 'shell',
+                    'fish': 'shell',
+                    'ps1': 'powershell',
+                    'dockerfile': 'dockerfile',
+                    'yml': 'yaml',
+                    'yaml': 'yaml'
+                };
+                return languageMap[ext] || 'javascript';
+            };
+
+            const refreshFileSystem = useCallback(async () => {
+                if (isLocalMode && localFS.directoryHandle) {
+                    // Refresh local directory structure
+                    const result = await localFS.loadDirectoryStructure();
+                    if (result.success) {
+                        virtualMirror.createMirror(result.data);
+                        setFileSystemState(virtualMirror.getVirtualStructure());
+                        handleLog({type: 'system', content: 'Local directory refreshed'});
+                    } else {
+                        handleLog({type: 'error', content: `Failed to refresh local directory: ${result.message}`});
+                    }
+                } else {
+                    // Fallback to virtual filesystem
+                    setFileSystemState({...fs.fs});
+                }
+            }, [isLocalMode, handleLog]);
+
+            const handleLog = useCallback((log) => {
+                setLogs(prev => [...prev, log]);
+            }, []);
+
+            // Auto-restore local directory on page load
+            useEffect(() => {
+                const restoreLocalDirectory = async () => {
+                    try {
+                        const lastHandle = await loadHandle();
+                        if (lastHandle) {
+                            // Restore the directory handle
+                            localFS.directoryHandle = lastHandle;
+                            localFS.isLocalMode = true;
+                            setIsLocalMode(true);
+                            
+                            // Load the directory structure
+                            const result = await localFS.loadDirectoryStructure();
+                            if (result.success) {
+                                // Create virtual mirror from the loaded structure
+                                virtualMirror.createMirror(result.data);
+                                setFileSystemState(virtualMirror.getVirtualStructure());
+                                handleLog({type: 'system', content: `Restored local directory: ${lastHandle.name}`});
+                            }
+                        }
+                    } catch (error) {
+                        handleLog({type: 'error', content: `Failed to restore local directory: ${error.message}`});
+                    }
+                };
+                
+                restoreLocalDirectory();
+            }, [handleLog]);
+
+            const handleFileSelect = useCallback(async (path) => {
+                if (!tabs.includes(path)) {
+                    setTabs(prev => [...prev, path]);
+                }
+                setActiveTab(path);
+                
+                // Set language based on file extension
+                const language = getLanguageFromFile(path);
+                setCurrentLanguage(language);
+                
+                // Always work with virtual mirror (which mirrors the local filesystem)
+                const virtualContent = virtualMirror.getVirtualFile(path);
+                if (virtualContent !== null) {
+                    setCode(virtualContent);
+                    handleLog({type: 'system', content: `File loaded: ${path} (${language})`});
+                } else {
+                    // Fall back to reading from local file system and update mirror
+                    const fileContent = await localFS.readFile(path);
+                    if(fileContent.success) {
+                        setCode(fileContent.data);
+                        // Update virtual mirror with local content
+                        virtualMirror.setVirtualFile(path, fileContent.data);
+                        handleLog({type: 'system', content: `File loaded from local: ${path} (${language})`});
+                    } else {
+                        handleLog({type: 'error', content: `Error reading file: ${fileContent.message}`});
+                    }
+                }
+            }, [tabs, handleLog, isLocalMode, getLanguageFromFile]);
+            
+            const handleCloseTab = (path) => {
+                const newTabs = tabs.filter(t => t !== path);
+                setTabs(newTabs);
+                if (activeTab === path) {
+                    if (newTabs.length > 0) {
+                        handleFileSelect(newTabs[0]);
+                    } else {
+                        setActiveTab(null);
+                        setCode('');
+                    }
+                }
+            };
+            
+            const handleCodeChange = (newCode) => {
+                setCode(newCode);
+                if(activeTab) {
+                    // Always update virtual mirror with changes
+                    virtualMirror.setVirtualFile(activeTab, newCode);
+                }
+            };
+
+            const handleResetFileSystem = () => {
+                if (window.confirm("Are you sure you want to reset the file system? All changes will be lost.")) {
+                    localFS.reset();
+                    virtualMirror.reset();
+                    fs.reset();
+                    refreshFileSystem();
+                    setIsLocalMode(false);
+                    setTabs([]);
+                    setActiveTab(null);
+                    setCode('');
+                    setConversationHistory([]); // Also reset conversation history
+                    setMessages([{role: 'ai', content: 'Hello! How can I help you code today?'}]);
+                    handleLog({type: 'system', content: 'File system has been reset.'});
+                }
+            };
+
+            const handleOpenLocalDirectory = useCallback(async () => {
+                const result = await localFS.openDirectory();
+                if (result.success) {
+                    const structureResult = await localFS.loadDirectoryStructure();
+                    if (structureResult.success) {
+                        // Create virtual mirror of the local directory
+                        const mirrorResult = await virtualMirror.createMirror(structureResult.data);
+                        if (mirrorResult.success) {
+                            setFileSystemState(structureResult.data);
+                            setIsLocalMode(true);
+                            handleLog({type: 'system', content: `${result.message} - Virtual mirror created`});
+                        } else {
+                            handleLog({type: 'error', content: 'Failed to create virtual mirror'});
+                        }
+                    } else {
+                        handleLog({type: 'error', content: structureResult.message});
+                    }
+                } else {
+                    handleLog({type: 'error', content: result.message});
+                }
+            }, [handleLog]);
+
+            const handleSaveFile = useCallback(async () => {
+                if (activeTab && code) {
+                    if (isLocalMode && localFS.isLocalFile(activeTab)) {
+                        // Update virtual mirror first
+                        virtualMirror.setVirtualFile(activeTab, code);
+                        // Then sync to local
+                        const syncResult = await virtualMirror.syncToLocal();
+                        if (syncResult.success) {
+                            handleLog({type: 'system', content: `File saved to local: ${activeTab}`});
+                        } else {
+                            handleLog({type: 'error', content: `Failed to sync to local: ${syncResult.message}`});
+                        }
+                    } else {
+                        fs.write(activeTab, code, true);
+                        handleLog({type: 'system', content: `File saved: ${activeTab}`});
+                    }
+                }
+            }, [activeTab, code, isLocalMode, handleLog]);
+
+            const handleSyncFromLocal = useCallback(async () => {
+                if (isLocalMode) {
+                    const syncResult = await virtualMirror.syncFromLocal();
+                    if (syncResult.success) {
+                        setFileSystemState(virtualMirror.getVirtualStructure());
+                        handleLog({type: 'system', content: 'Synced from local to virtual'});
+                    } else {
+                        handleLog({type: 'error', content: `Sync failed: ${syncResult.message}`});
+                    }
+                }
+            }, [isLocalMode, handleLog]);
+
+            const handleSyncToLocal = useCallback(async () => {
+                if (isLocalMode) {
+                    const syncResult = await virtualMirror.syncToLocal();
+                    if (syncResult.success) {
+                        handleLog({type: 'system', content: `Synced ${syncResult.changes.length} files to local`});
+                    } else {
+                        handleLog({type: 'error', content: `Sync failed: ${syncResult.message}`});
+                    }
+                }
+            }, [isLocalMode, handleLog]);
+            
+            const handleSendMessage = useCallback(async (prompt) => {
+                setMessages(prev => [...prev, {role: 'user', content: prompt}]);
+                setLoading(true);
+                handleLog({type: 'info', content: `User prompt: "${prompt}"`});
+
+                const { responseText, newHistory } = await generateContent(prompt, conversationHistory, handleLog);
+                
+                if(responseText) {
+                    setMessages(prev => [...prev, {role: 'ai', content: responseText}]);
+                }
+                
+                if (newHistory) {
+                    setConversationHistory(newHistory);
+                }
+                
+                setLoading(false);
+                refreshFileSystem(); // Refresh FS view after AI operations
+            }, [generateContent, handleLog, refreshFileSystem, conversationHistory]);
+
+            return (
+                <Fragment>
+                    <div className="h-screen w-screen flex flex-col text-sm">
+                        {/* Main Content */}
+                        <div className="flex flex-grow overflow-hidden">
+                            {/* Left Panel */}
+                            <div className="w-1/5 min-w-[200px] border-r border-gray-800">
+                                <FileExplorer 
+                                    onFileSelect={handleFileSelect} 
+                                    fileTree={fileSystemState} 
+                                    onReset={handleResetFileSystem} 
+                                    onRefresh={refreshFileSystem}
+                                    onOpenLocalDirectory={handleOpenLocalDirectory}
+                                    isLocalMode={isLocalMode}
+                                    onSyncFromLocal={handleSyncFromLocal}
+                                    onSyncToLocal={handleSyncToLocal}
+                                />
+                            </div>
+
+                            {/* Center Panel */}
+                            <div className="w-3/5 flex flex-col">
+                                {/* Tabs */}
+                                {tabs.length > 0 && (
+                                    <div className="flex border-b border-gray-800 bg-[#010409]">
+                                    {tabs.map(tab => (
+                                        <div key={tab} className={`py-2 px-4 cursor-pointer text-xs ${activeTab === tab ? 'bg-[#0D1117] border-b-2 border-cyan-400' : 'text-gray-400'}`}
+                                            onClick={() => handleFileSelect(tab)}>
+                                            {tab.split('/').pop()}
+                                            <button className="ml-2 hover:text-white" onClick={(e) => { e.stopPropagation(); handleCloseTab(tab); }}>x</button>
+                                        </div>
+                                    ))}
+                                    </div>
+                                )}
+                                {/* Editor */}
+                                <div className="flex-grow">
+                                    <Editor 
+                                        code={code} 
+                                        onCodeChange={handleCodeChange} 
+                                        language={currentLanguage}
+                                    />
+                                </div>
+                            </div>
+                            
+                            {/* Right Panel */}
+                            <div className="w-1/5 min-w-[250px] border-l border-gray-800">
+                                <Chatbox messages={messages} onSendMessage={handleSendMessage} loading={loading} />
+                            </div>
+                        </div>
+
+                        {/* Bottom Panel */}
+                        <div className="h-1/4 min-h-[150px] border-t border-gray-800">
+                            <Logger logs={logs} />
+                        </div>
+                    </div>
+                </Fragment>
+            );
+        };
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<StrictMode><App /></StrictMode>);
+    </script>
+<script type="module" src="/index.tsx"></script>
+</body>
+</html>
