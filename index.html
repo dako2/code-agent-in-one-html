@@ -1,436 +1,67 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI Code Companion — Vanilla</title>
-  <style>
-    :root {
-      --bg: #0d1117; --bg2:#010409; --fg:#c9d1d9; --muted:#8b949e; --accent:#2f81f7; --border:#30363d; --ok:#2ea043; --warn:#d29922; --err:#f85149;
-    }
-    * { box-sizing: border-box }
-    html, body { height: 100% }
-    body { margin:0; background:var(--bg); color:var(--fg); font: 13px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji" }
-    .app { display:flex; flex-direction:column; height:100vh }
-    .row { display:flex; min-height:0 }
-    .col { display:flex; flex-direction:column; min-width:0 }
-    .pane { border-color:var(--border); }
-    .pane + .pane { border-left:1px solid var(--border) }
-    header { display:flex; align-items:center; gap:.5rem; padding:.5rem .75rem; background:var(--bg2); border-bottom:1px solid var(--border); position:sticky; top:0; z-index:2 }
-    header .grow { flex:1 }
-    button, .btn { border:1px solid var(--border); background:#161b22; color:var(--fg); padding:.35rem .6rem; border-radius:.4rem; cursor:pointer }
-    button:hover { border-color:#3b434b; background:#1b2230 }
-    button.ghost { border-color:transparent; background:transparent }
-    button.primary { background:var(--accent); border-color:transparent; color:white }
-    .bar { padding:.4rem .5rem; border-bottom:1px solid var(--border); background:var(--bg2) }
-    .split { flex:1; display:flex; min-height:0 }
-    .left { width:22%; min-width:200px }
-    .center { width:56% }
-    .right { width:22%; min-width:240px }
-    .list { padding:.4rem .5rem; overflow:auto; flex:1 }
-    .tree-item { display:flex; align-items:center; gap:.4rem; padding:.15rem .25rem; border-radius:.25rem; cursor:pointer; user-select:none }
-    .tree-item:hover { background:#0f1520 }
-    .active { color:var(--accent) }
-    .rowline { display:flex; align-items:center; gap:.4rem }
-    .path { color:var(--muted); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
-    .tabs { display:flex; gap:4px; padding:.25rem; background:var(--bg2); border-bottom:1px solid var(--border) }
-    .tab { padding:.35rem .5rem; border:1px solid var(--border); border-bottom:none; border-radius:.4rem .4rem 0 0; background:#0f1420; cursor:pointer; max-width:200px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
-    .tab.active { background:#0d1117; color:var(--accent) }
-    .editor-wrap { flex:1; display:flex; min-height:0 }
-    textarea.editor { flex:1; border:none; outline:none; resize:none; padding:12px 14px; background:#0c111b; color:var(--fg); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-    .pill { display:inline-flex; align-items:center; gap:.35rem; padding:.1rem .45rem; background:#0f1420; border:1px solid var(--border); border-radius:999px; color:var(--muted); font-size:12px }
-    .chat-list { flex:1; overflow:auto; padding:.5rem; display:flex; flex-direction:column; gap:.4rem }
-    .bubble { max-width:85%; padding:.45rem .6rem; border-radius:.6rem; background:#111827; white-space:pre-wrap; word-break:break-word }
-    .me { align-self:flex-end; background:#1f4f9c }
-    .sys { color:var(--muted); font-style:italic }
-    .input-row { display:flex; gap:.4rem; padding:.5rem; border-top:1px solid var(--border) }
-    .input-row input { flex:1; border:1px solid var(--border); background:#0c111b; color:var(--fg); border-radius:.4rem; padding:.45rem .6rem; outline:none }
-    .log { flex:1; overflow:auto; padding:.5rem; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-    .log .line { margin:.1rem 0 }
-    .log .t { color:var(--muted) }
-    .log .ok { color:var(--ok) }
-    .log .warn { color:var(--warn) }
-    .log .err { color:var(--err) }
-    .mem { padding:.5rem; font-size:12px; border-left:1px solid var(--border); overflow:auto }
-    .kbd { padding:.05rem .35rem; border:1px solid var(--border); border-bottom-width:2px; border-radius:.3rem; background:#0f1420; font: 11px ui-monospace }
-  </style>
-</head>
-<body>
-<div class="app">
-  <header>
-    <strong>AI Code Companion — No Deps</strong>
-    <span class="grow"></span>
-    <span class="pill" id="modeBadge">Workspace</span>
-    <button id="openDirBtn">📁 Open Folder</button>
-    <button id="syncFromBtn" title="Sync from Local ➜ Virtual">⬇️ From Local</button>
-    <button id="syncToBtn" title="Sync from Virtual ➜ Local">⬆️ To Local</button>
-    <button id="resetBtn">🗑 Reset</button>
-  </header>
-
-  <div class="row split">
-    <!-- LEFT: Explorer -->
-    <section class="col pane left">
-      <div class="bar">
-        <div class="rowline" style="justify-content:space-between; align-items:center">
-          <div><strong>Explorer</strong> <span id="rootName" class="muted"></span></div>
-          <div class="rowline" style="gap:.25rem">
-            <button class="ghost" id="expandAllBtn" title="Expand all">➕</button>
-            <button class="ghost" id="collapseAllBtn" title="Collapse all">➖</button>
-          </div>
-        </div>
-        <div class="rowline" style="margin-top:.4rem; gap:.35rem">
-          <input id="filterInput" placeholder="Filter files…" style="width:100%; border:1px solid var(--border); background:#0c111b; color:var(--fg); border-radius:.35rem; padding:.3rem .45rem" />
-        </div>
-      </div>
-      <div class="bar path" id="crumb">—</div>
-      <div class="list" id="tree"></div>
-    </section>
-
-    <!-- CENTER: Editor -->
-    <section class="col pane center">
-      <div class="tabs" id="tabs"></div>
-      <div class="editor-wrap">
-        <textarea id="editor" class="editor" spellcheck="false" placeholder="Select a file from the left or create one via the chat tools."></textarea>
-      </div>
-    </section>
-
-    <!-- RIGHT: Chat -->
-    <section class="col pane right">
-      <div class="bar"><strong>Chat</strong></div>
-      <div id="chat" class="chat-list"></div>
-      <div class="input-row">
-        <input id="chatInput" placeholder="Ask (offline). Try: create src/hello.txt with \"hi\"" />
-        <button id="sendBtn" class="primary">Send</button>
-      </div>
-    </section>
-  </div>
-
-  <!-- BOTTOM: Logs & Memory -->
-  <div class="row" style="height:28vh; border-top:1px solid var(--border)">
-    <section class="col" style="flex:1; min-width:0">
-      <div class="bar"><strong>Logs</strong></div>
-      <div id="logs" class="log"></div>
-    </section>
-    <section class="col mem" style="width:32%">
-      <div class="bar"><strong>Memory</strong></div>
-      <div style="padding:.5rem">
-        <div>Messages: <span id="memMsgs">0</span></div>
-        <div>Facts: <span id="memFacts">0</span></div>
-        <div>Vectors: <span id="memVecs">0</span></div>
-        <div>Static: <span id="memStatic">0</span></div>
-        <div style="margin-top:.5rem; display:flex; gap:.4rem">
-          <button id="memRefresh">Refresh</button>
-          <button id="memExport">Export</button>
-          <button id="memImport">Import</button>
-          <button id="memClear" style="border-color:var(--err); color:var(--err)">Clear</button>
-        </div>
-      </div>
-      <div style="padding:.5rem; height:100%; overflow:auto">
-        <div style="margin-bottom:.25rem; color:var(--muted)">Preview:</div>
-        <div id="memPreview" style="font:11px/1.5 ui-monospace"></div>
-      </div>
-    </section>
+<!doctype html><meta charset="utf-8"><title>Gemini 2.5 — Mini Editor + Memory</title><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--b:#e5e7eb;--mut:#6b7280}*{box-sizing:border-box}html,body{height:100%}
+body{margin:0;font:13px ui-monospace,monospace;display:flex;flex-direction:column}
+header{display:flex;gap:.5rem;align-items:center;padding:.5rem;border-bottom:1px solid var(--b);background:#fafafa;flex-wrap:wrap}
+input,button,textarea{border:1px solid var(--b);background:#fff;border-radius:6px;padding:.35rem .55rem}
+button{cursor:pointer}button:hover{background:#f3f4f6}label{display:flex;align-items:center;gap:.35rem}
+#wrap{flex:1;display:grid;grid-template-rows:1fr 35vh}
+#editor{border:0;border-bottom:1px solid var(--b);padding:10px;resize:none;outline:none}
+#chatbox{display:flex;flex-direction:column;overflow:hidden}#chat{flex:1;overflow:auto;padding:8px}
+#prompt{min-height:60px;resize:vertical}
+.m{margin:.35rem 0;padding:.45rem .6rem;border:1px solid var(--b);border-radius:8px;white-space:pre-wrap;word-break:break-word}
+.me{background:#eef4ff}.bot{background:#f6fff2}.err{background:#fff1f2}small{color:var(--mut)}
+</style>
+<header>
+  <input id="key" type="password" placeholder="Google AI API Key" style="min-width:240px">
+  <button id="send">Send</button>
+  <label><input id="memOn" type="checkbox" checked>🧠 Memory <small id="memStat">(0)</small></label>
+  <button id="clearMem" title="/clear-mem does the same">Clear Mem</button>
+  <small>⌘/Ctrl+Enter • sessionStorage</small>
+</header>
+<div id="wrap">
+  <textarea id="editor" placeholder="Paste or write code here…" spellcheck="false"></textarea>
+  <div id="chatbox">
+    <div id="chat"><div class="m">Paste your key, then ask. Commands: <b>/remember fact</b>, <b>/mem</b>, <b>/clear-mem</b>.</div></div>
+    <textarea id="prompt" placeholder="Ask Gemini 2.5 Flash about your code…"></textarea>
   </div>
 </div>
-
-<script>
-// =============== Utilities ===============
-const $ = (id) => document.getElementById(id);
-const logEl = $("logs");
-function log(msg, level="info"){
-  const line = document.createElement("div");
-  line.className = "line" + (level==='ok'?' ok':level==='warn'?' warn':level==='err'?' err':'');
-  const ts = new Date().toLocaleTimeString();
-  line.innerHTML = `<span class="t">[${ts}]</span> ${escapeHtml(String(msg))}`;
-  logEl.appendChild(line);
-  logEl.scrollTop = logEl.scrollHeight;
+<script type="module">
+import { GoogleGenerativeAI as G } from 'https://esm.run/@google/generative-ai';
+const $=q=>document.querySelector(q),K=$('#key'),E=$('#editor'),P=$('#prompt'),C=$('#chat'),ON=$('#memOn'),S=$('#memStat'),CLR=$('#clearMem'),MK='mini_mem_v1';
+K.value=sessionStorage.getItem('g_api_key')||'';K.oninput=()=>sessionStorage.setItem('g_api_key',K.value.trim());
+const add=(cls,t)=>{const d=document.createElement('div');d.className=`m ${cls}`;d.textContent=t;C.appendChild(d);C.scrollTop=C.scrollHeight};
+class M{constructor(){const j=sessionStorage.getItem(MK);const x=j?JSON.parse(j):{facts:[],turns:[]};this.facts=x.facts;this.turns=x.turns;this.keep=20}
+ save(){sessionStorage.setItem(MK,JSON.stringify({facts:this.facts,turns:this.turns.slice(-this.keep)}));S.textContent=`(${this.facts.length+this.turns.length})`}
+ clear(){this.facts=[];this.turns=[];this.save()}
+ fact(t){t=t.trim();if(t)this.facts.push(t),this.save()}
+ turn(q,a){this.turns.push({q,a,ts:Date.now()});this.save()}
+ recall(b=4000){const p=[];if(this.facts.length)p.push('FACTS:\n'+this.facts.map(f=>'- '+f).join('\n'));let u=p.join('\n\n').length;
+ for(let i=Math.max(0,this.turns.length-this.keep);i<this.turns.length;i++){const t=this.turns[i],blk=`Q: ${t.q}\nA: ${t.a}`;if(u+blk.length+2>b)break;p.push(blk);u+=blk.length+2}
+ return p.join('\n\n')}
 }
-function escapeHtml(str){return str.replace(/[&<>"]/g,s=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[s]))}
-
-// =============== LIMemory (with working set) ===============
-class LIMemory {
-  constructor(options={}){
-    this.messages=[]; this.tokenLimit=options.tokenLimit||12000; this.shortTermRatio=options.shortTermTokenLimitRatio||0.7;
-    this.staticBlocks=Array.isArray(options.staticBlocks)?options.staticBlocks:[]; this.maxFacts=options.maxFacts||50; this.facts=[];
-    this.enableVector=options.enableVector!==false; this.vectorDocs=[];
-    this.working={ activePath:null, activeFolder:"/", selection:"" };
-  }
-  static _normalize(text){return (text||'').toLowerCase().replace(/[^a-z0-9\s_\-\.]/g,' ').split(/\s+/).filter(Boolean)}
-  _vectorAdd(text){ if(!this.enableVector) return; const id = `${Date.now()}_${Math.random().toString(36).slice(2,8)}`; this.vectorDocs.push({id,text:text||''}); if(this.vectorDocs.length>500) this.vectorDocs.shift(); }
-  _vectorSearch(query, topK=3){ if(!this.enableVector||!query) return []; const q=LIMemory._normalize(query); if(!q.length) return []; const scores=this.vectorDocs.map(doc=>{ const d=LIMemory._normalize(doc.text); const set=new Set(d); let s=0; for(const t of q) if(set.has(t)) s++; return { id:doc.id, text:doc.text, score:s };}); return scores.filter(s=>s.score>0).sort((a,b)=>b.score-a.score).slice(0,topK); }
-  _extractFacts(text){ const sentences=(text||'').split(/(?<=[\.!?])\s+/); for(const s of sentences){ if(/\b(is|are|was|were|has|have|uses)\b/i.test(s)&&s.length<=200){ this.facts.push(s.trim()); if(this.facts.length>this.maxFacts) this.facts.shift(); }} }
-  setWorking(partial={}){ const MAX_SEL=1200; const next={...this.working, ...partial}; if(typeof next.selection==='string' && next.selection.length>MAX_SEL){ next.selection = next.selection.slice(0,MAX_SEL)+"\n…[truncated]" } this.working=next }
-  getWorking(){ return {...this.working} }
-  add(message){ if(!message?.role) return; const parts=[{text: message.content??''}]; const role= message.role==='assistant'?'model':message.role; this.messages.push({role, parts}); if(role==='model'){ const t=message.content||''; this._extractFacts(t); this._vectorAdd(t); } else if(role==='user'){ this._vectorAdd(message.content||''); } }
-  get(){ return [...this.messages] }
-  getLLM({tokenLimit}={}){
-    const limit=tokenLimit||this.tokenLimit; const assembled=[];
-    const w=this.getWorking();
-    const workingBlock = `Working context:\n- activePath: ${w.activePath||'(none)'}\n- activeFolder: ${w.activeFolder||'/'}\n` + (w.selection?`- selection: |\n${w.selection}\n`:`- selection: (none)\n`);
-    assembled.push({role:'user', parts:[{text:workingBlock}]});
-    if(this.staticBlocks.length){ assembled.push({role:'user', parts:[{text:this.staticBlocks.join('\n')}]}); }
-    const lastUser=[...this.messages].reverse().find(m=>m.role==='user');
-    const query= lastUser?.parts?.map(p=>p.text||'').join('')||''; const vec=this._vectorSearch(query,3); if(vec.length){ assembled.push({role:'user', parts:[{text:'Relevant context:\n'+vec.map(v=>`- ${v.text}`).join('\n')}]}); }
-    if(this.facts.length){ assembled.push({role:'user', parts:[{text:'Known facts:\n'+this.facts.map(f=>`- ${f}`).join('\n')}]}); }
-    let used=assembled.reduce((n,m)=> n+(m.parts?.map(p=>p.text||'').join('').length||0),0);
-    const remaining=Math.max(1000, limit-used); let total=0; const acc=[]; for(let i=this.messages.length-1; i>=0; i--){ const m=this.messages[i]; const text=(m.parts?.map(p=>p.text||'').join(''))||''; total+=text.length; if(total>remaining) break; acc.push(m) } acc.reverse().forEach(m=>assembled.push(m));
-    return assembled;
-  }
-  snapshot(){ try{ return JSON.stringify({ messages:this.messages, staticBlocks:this.staticBlocks, facts:this.facts, vectorDocs:this.vectorDocs, tokenLimit:this.tokenLimit, shortTermRatio:this.shortTermRatio, maxFacts:this.maxFacts, enableVector:this.enableVector, working:this.working }); } catch{ return '[]' } }
-  load(snapshot){ try{ const obj=JSON.parse(snapshot||'{}'); if(obj&&typeof obj==='object'){ this.messages=Array.isArray(obj.messages)?obj.messages:[]; this.staticBlocks=Array.isArray(obj.staticBlocks)?obj.staticBlocks:[]; this.facts=Array.isArray(obj.facts)?obj.facts:[]; this.vectorDocs=Array.isArray(obj.vectorDocs)?obj.vectorDocs:[]; this.tokenLimit=obj.tokenLimit||this.tokenLimit; this.shortTermRatio=obj.shortTermRatio||this.shortTermRatio; this.maxFacts=obj.maxFacts||this.maxFacts; this.enableVector=obj.enableVector!==false; if(obj.working&&typeof obj.working==='object'){ this.working={...this.working, ...obj.working} } } } catch{}
-  }
-  clear(){ this.messages=[]; this.facts=[]; this.vectorDocs=[]; this.working={ activePath:null, activeFolder:'/', selection:'' } }
+const mem=new M();mem.save();
+const MODEL='gemini-2.5-flash';
+async function ask(q){
+  const k=K.value.trim(); if(!k) throw new Error('API key required.');
+  const m=new G(k).getGenerativeModel({model:MODEL});
+  const txt=`You are a concise coding assistant.\n\nCONTEXT:\n---\n${E.value.slice(0,12000)}\n---\n\nMEMORY:\n---\n${mem.recall(4000)||'(none)'}\n---\n\nQUESTION:\n${q}`;
+  const r=await m.generateContent({contents:[{role:'user',parts:[{text:txt}]}],generationConfig:{temperature:.3}});
+  return r?.response?.text()||'(no response)';
 }
-
-// =============== Simple FS (localStorage-backed) ===============
-const initialFileSystem = {};
-class FileSystem { constructor(){ this.fs=this.loadFromLocalStorage() } loadFromLocalStorage(){ try{ const s=localStorage.getItem('ai_code_fs'); if(s) return JSON.parse(s) }catch(e){ log('Failed to load FS: '+e,'err') } return JSON.parse(JSON.stringify(initialFileSystem)) }
-  save(){ try{ localStorage.setItem('ai_code_fs', JSON.stringify(this.fs)) }catch(e){ log('Failed to save FS: '+e,'err') } }
-  reset(){ this.fs=JSON.parse(JSON.stringify(initialFileSystem)); this.save() }
+function cmd(q){
+  if(q.startsWith('/remember ')) return mem.fact(q.slice(10)),add('bot','✅ Remembered.'),1;
+  if(q==='/mem') return add('bot',mem.recall(8000)||'(empty)'),1;
+  if(q==='/clear-mem') return mem.clear(),add('bot','🧹 Memory cleared.'),1;
 }
-const fsStore = new FileSystem();
-
-// =============== IndexedDB (remember last directory handle) ===============
-const DB_NAME='editor-db', STORE='handles', KEY='dir';
-function idbOpen(){return new Promise((res,rej)=>{ const r=indexedDB.open(DB_NAME,1); r.onupgradeneeded=()=> r.result.createObjectStore(STORE); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error) })}
-async function saveHandle(handle){ const db=await idbOpen(); await new Promise((res,rej)=>{ const tx=db.transaction(STORE,'readwrite'); tx.objectStore(STORE).put(handle,KEY); tx.oncomplete=res; tx.onerror=()=>rej(tx.error) })}
-async function loadHandle(){ const db=await idbOpen(); return await new Promise((res,rej)=>{ const tx=db.transaction(STORE,'readonly'); const req=tx.objectStore(STORE).get(KEY); req.onsuccess=()=>res(req.result||null); req.onerror=()=>rej(req.error) })}
-
-// =============== Local File System Access API wrapper ===============
-class LocalFileSystem {
-  constructor(){ this.directoryHandle=null; this.isLocalMode=false }
-  async openDirectory(){
-    try{
-      if(!window.showDirectoryPicker) throw new Error('File System Access API not supported. Use Chrome/Edge.');
-      const last=await loadHandle().catch(()=>null);
-      this.directoryHandle = await window.showDirectoryPicker({ id:'vanilla-editor-root', startIn: last||'documents', mode:'readwrite' });
-      this.isLocalMode=true; await saveHandle(this.directoryHandle); return {success:true, message:`Opened: ${this.directoryHandle.name}`}
-    }catch(e){ if(e.name==='AbortError') return {success:false, message:'Selection cancelled'}; return {success:false, message:e.message} }
-  }
-  async _loadDirectory(dirHandle){ const result={}; for await (const [name,handle] of dirHandle.entries()){ if(name.startsWith('.')) continue; if(handle.kind==='file'){ try{ const file=await handle.getFile(); const text= await file.text().catch(()=>`[Binary file - ${name}]`); result[name]=text }catch{ result[name]=`[Binary file - ${name}]` } } else { result[name]= await this._loadDirectory(handle) } } return result }
-  async loadDirectoryStructure(){ if(!this.directoryHandle) return {success:false, message:'No directory selected'}; try{ const structure= await this._loadDirectory(this.directoryHandle); return {success:true, data: structure} }catch(e){ return {success:false, message:e.message} }
-  }
-  async readFile(filePath){ if(!this.directoryHandle) return {success:false, message:'No directory selected'}; try{ const parts=filePath.split('/').filter(Boolean); let dir=this.directoryHandle; for(let i=0;i<parts.length-1;i++){ dir=await dir.getDirectoryHandle(parts[i]) } const name=parts[parts.length-1]; const fh=await dir.getFileHandle(name); const file=await fh.getFile(); const text=await file.text(); return {success:true, data:text} }catch(e){ return {success:false, message:e.message} }
-  }
-  async writeFile(filePath, content){ if(!this.directoryHandle) return {success:false, message:'No directory selected'}; try{ const parts=filePath.split('/').filter(Boolean); let dir=this.directoryHandle; for(let i=0;i<parts.length-1;i++){ try{ dir=await dir.getDirectoryHandle(parts[i]) }catch{ dir=await dir.getDirectoryHandle(parts[i],{create:true}) } } const name=parts[parts.length-1]; const fh=await dir.getFileHandle(name,{create:true}); const w=await fh.createWritable(); await w.write(content); await w.close(); return {success:true, message:`Saved ${filePath}`} }catch(e){ return {success:false, message:e.message} }
-  }
-  async createDirectory(dirPath){ if(!this.directoryHandle) return {success:false, message:'No directory selected'}; try{ const parts=dirPath.split('/').filter(Boolean); let dir=this.directoryHandle; for(const p of parts){ try{ dir=await dir.getDirectoryHandle(p) }catch{ dir=await dir.getDirectoryHandle(p,{create:true}) } } return {success:true, message:`Dir created: ${dirPath}`} }catch(e){ return {success:false, message:e.message} }
-  }
-  async deleteFile(filePath){ if(!this.directoryHandle) return {success:false, message:'No directory selected'}; try{ const parts=filePath.split('/').filter(Boolean); let dir=this.directoryHandle; for(let i=0;i<parts.length-1;i++){ dir=await dir.getDirectoryHandle(parts[i]) } await dir.removeEntry(parts[parts.length-1]); return {success:true, message:`Deleted ${filePath}`} }catch(e){ return {success:false, message:e.message} }
-  }
-  async deleteDirectory(dirPath){ if(!this.directoryHandle) return {success:false, message:'No directory selected'}; try{ const parts=dirPath.split('/').filter(Boolean); let dir=this.directoryHandle; for(let i=0;i<parts.length-1;i++){ dir=await dir.getDirectoryHandle(parts[i]) } await dir.removeEntry(parts[parts.length-1],{recursive:true}); return {success:true, message:`Deleted ${dirPath}`} }catch(e){ return {success:false, message:e.message} }
-  }
-  reset(){ this.directoryHandle=null; this.isLocalMode=false }
-  isLocalFile(p){ return this.isLocalMode && !p.startsWith('/') }
+async function send(){
+  const q=P.value.trim(); if(!q) return;
+  add('me',q); P.value='';
+  if(cmd(q)) return;
+  try{const a=await ask(q); add('bot',a); if(ON.checked) mem.turn(q,a)}
+  catch(e){add('err',e?.message||'Request failed')}
 }
-const localFS = new LocalFileSystem();
-
-// =============== Virtual Mirror ===============
-class VirtualMirror {
-  constructor(){ this.mirror={}; this.localToVirtual=new Map(); this.virtualToLocal=new Map(); this.changeHistory=[]; this.isMirroring=false }
-  async createMirror(localStructure){ this.mirror={}; this.localToVirtual.clear(); this.virtualToLocal.clear(); this.isMirroring=true; await this._mirrorDirectory(localStructure,'',''); return {success:true, message:'Mirror created'} }
-  async _mirrorDirectory(localStructure, localPath, virtualPath){ for(const [name,content] of Object.entries(localStructure)){ const lp=localPath?`${localPath}/${name}`:name; const vp=virtualPath?`${virtualPath}/${name}`:name; this.localToVirtual.set(lp,vp); this.virtualToLocal.set(vp,lp); if(typeof content==='object' && content!==null){ this._ensureDir(vp); await this._mirrorDirectory(content, lp, vp) } else { this.mirror[vp]=content } } }
-  _ensureDir(vp){ if(!this.mirror[vp]) this.mirror[vp]={} }
-  async syncToLocal(){ if(!this.isMirroring) return {success:false, message:'No mirror'}; const changes=[]; for(const [vp,content] of Object.entries(this.mirror)){ if(typeof content==='string'){ const lp=this.virtualToLocal.get(vp); if(lp){ const r=await localFS.writeFile(lp, content); if(r.success) changes.push({type:'write', path:lp}) } } } this.changeHistory.push({timestamp:Date.now(), type:'sync_to_local', changes}); return {success:true, message:`Synced ${changes.length} files`, changes} }
-  async syncFromLocal(){ if(!this.isMirroring) return {success:false, message:'No mirror'}; const s=await localFS.loadDirectoryStructure(); if(s.success){ await this.createMirror(s.data); return {success:true, message:'Synced from local'} } return {success:false, message:s.message} }
-  getVirtualFile(vp){ return this.mirror[vp] ?? null }
-  setVirtualFile(vp, content){ if(content===null){ delete this.mirror[vp]; } else { this.mirror[vp]=content } this.changeHistory.push({timestamp:Date.now(), type:'virtual_change', path:vp, content}) }
-  getVirtualStructure(){ return this.mirror }
-  reset(){ this.mirror={}; this.localToVirtual.clear(); this.virtualToLocal.clear(); this.changeHistory=[]; this.isMirroring=false }
-}
-const virtualMirror = new VirtualMirror();
-
-// =============== UI State ===============
-const state = {
-  treeFilter: '',
-  expanded: new Set(),
-  tabs: [],
-  activePath: null,
-  editorDirty: false,
-  languageByExt: {
-    js:'javascript', jsx:'javascript', ts:'typescript', tsx:'typescript', py:'python', java:'java', cpp:'cpp', c:'c', cs:'csharp', php:'php', rb:'ruby', go:'go', rs:'rust', html:'html', css:'css', scss:'scss', sass:'sass', less:'less', json:'json', xml:'xml', yaml:'yaml', yml:'yaml', md:'markdown', sql:'sql', sh:'shell', bash:'shell', zsh:'shell', fish:'shell', ps1:'powershell', dockerfile:'dockerfile'
-  }
-};
-const memory = new LIMemory({ tokenLimit:12000, staticBlocks:[ 'You are an offline coding assistant. You do not call network APIs. When asked to create/update files, you operate on the virtual mirror and can sync to local on request.' ], maxFacts:50, enableVector:true });
-
-// Restore memory snapshot if present
-try{ const snap=localStorage.getItem('ai_memory_snapshot'); if(snap) memory.load(snap) }catch{}
-
-// =============== Render: Explorer Tree ===============
-function renderTree(){ const container=$("tree"); container.innerHTML=''; const root = virtualMirror.getVirtualStructure(); const filter = state.treeFilter.toLowerCase(); function match(name){ return !filter || name.toLowerCase().includes(filter) }
-  function hasChildMatch(obj){ return Object.entries(obj).some(([n,c])=> typeof c==='object' && c!==null ? (match(n)||hasChildMatch(c)) : match(n)) }
-  function addNode(obj, base=''){
-    Object.entries(obj).forEach(([name,content])=>{
-      const path = base? `${base}/${name}` : name; const isDir = typeof content==='object' && content!==null;
-      if(isDir){ if(!match(name) && !hasChildMatch(content)) return; const open=state.expanded.has(path); const row=document.createElement('div'); row.className='tree-item'; row.style.paddingLeft = (path.split('/').length-1)*12 + 'px'; row.innerHTML = `${open?'📂':'📁'} <span>${escapeHtml(name)}</span>`; row.onclick=()=>{ if(open) state.expanded.delete(path); else state.expanded.add(path); renderTree() }; container.appendChild(row); if(open){ addNode(content, path) }
-      } else { if(!match(name)) return; const row=document.createElement('div'); row.className='tree-item'+(state.activePath===path?' active':''); row.style.paddingLeft = (path.split('/').length-1)*12 + 16 + 'px'; row.innerHTML = `📄 <span>${escapeHtml(name)}</span>`; row.onclick=()=> openFile(path); container.appendChild(row) }
-    })
-  }
-  addNode(root,''); $("crumb").textContent = state.activePath || '—';
-}
-
-function expandAll(){ const root=virtualMirror.getVirtualStructure(); function collect(obj, base=''){ Object.entries(obj).forEach(([n,c])=>{ const p= base?`${base}/${n}`:n; if(typeof c==='object' && c!==null){ state.expanded.add(p); collect(c,p) } }) } collect(root); renderTree() }
-function collapseAll(){ state.expanded = new Set(); renderTree() }
-
-// =============== Tabs & Editor ===============
-const editorEl = $("editor");
-editorEl.addEventListener('input', ()=>{ state.editorDirty=true; if(state.activePath){ virtualMirror.setVirtualFile(state.activePath, editorEl.value); // update working selection
-  memory.setWorking({ activePath: state.activePath, activeFolder: state.activePath.split('/').slice(0,-1).join('/')||'/', selection: editorEl.value.substring(editorEl.selectionStart, editorEl.selectionEnd) }); }
-});
-editorEl.addEventListener('select', ()=>{ if(state.activePath){ memory.setWorking({ selection: editorEl.value.substring(editorEl.selectionStart, editorEl.selectionEnd) }) } });
-
-function renderTabs(){ const t=$("tabs"); t.innerHTML=''; state.tabs.forEach(tab=>{
-  const el=document.createElement('div'); el.className='tab'+(tab===state.activePath?' active':''); el.title=tab; el.textContent=tab.split('/').pop(); el.onclick=()=> openFile(tab);
-  const close=document.createElement('span'); close.style.marginLeft='.4rem'; close.style.opacity='.8'; close.style.cursor='pointer'; close.textContent='×'; close.onclick=(e)=>{ e.stopPropagation(); closeTab(tab) };
-  el.appendChild(close); t.appendChild(el);
-}) }
-
-function openFile(path){ if(!state.tabs.includes(path)) state.tabs.push(path); state.activePath=path; renderTabs(); const content = virtualMirror.getVirtualFile(path); if(content!==null){ editorEl.value= content; editorEl.disabled=false; state.editorDirty=false; log(`Opened ${path}`,'ok'); memory.setWorking({ activePath:path, activeFolder:path.split('/').slice(0,-1).join('/')||'/' }); } else { editorEl.value=''; editorEl.disabled=true; log(`File not found: ${path}`,'err') } renderTree() }
-function closeTab(path){ state.tabs = state.tabs.filter(t=>t!==path); if(state.activePath===path){ state.activePath = state.tabs[0]||null; if(state.activePath){ openFile(state.activePath) } else { editorEl.value=''; editorEl.disabled=true } } renderTabs(); renderTree() }
-
-// =============== Explorer Controls ===============
-$("filterInput").addEventListener('input', e=>{ state.treeFilter=e.target.value; renderTree() });
-$("expandAllBtn").onclick=expandAll; $("collapseAllBtn").onclick=collapseAll;
-
-// =============== Top Bar Buttons ===============
-$("openDirBtn").onclick = async ()=>{
-  const r = await localFS.openDirectory();
-  if(r.success){ $("modeBadge").textContent = `Local: ${localFS.directoryHandle.name}`; $("rootName").textContent = localFS.directoryHandle.name; const s=await localFS.loadDirectoryStructure(); if(s.success){ await virtualMirror.createMirror(s.data); renderTree(); log(r.message,'ok') } else { log('Failed loading dir: '+s.message,'err') } }
-  else{ log(r.message,'warn') }
-}
-$("syncFromBtn").onclick = async ()=>{ const r= await virtualMirror.syncFromLocal(); if(r.success){ renderTree(); log(r.message,'ok') } else { log('Sync failed: '+r.message,'err') } }
-$("syncToBtn").onclick = async ()=>{ const r= await virtualMirror.syncToLocal(); if(r.success){ log(`${r.message}`,'ok') } else { log('Sync failed: '+r.message,'err') } }
-$("resetBtn").onclick = ()=>{ if(confirm('Reset virtual mirror and memory?')){ localFS.reset(); virtualMirror.reset(); fsStore.reset(); state.tabs=[]; state.activePath=null; editorEl.value=''; editorEl.disabled=true; memory.clear(); try{ localStorage.removeItem('ai_memory_snapshot') }catch{}; $("modeBadge").textContent='Workspace'; $("rootName").textContent=''; renderTree(); renderTabs(); log('Reset complete','warn') } }
-
-// =============== Auto-restore last local folder ===============
-(async function restore(){ try{ const last=await loadHandle(); if(last){ localFS.directoryHandle=last; localFS.isLocalMode=true; $("modeBadge").textContent=`Local: ${last.name}`; $("rootName").textContent= last.name; const s=await localFS.loadDirectoryStructure(); if(s.success){ await virtualMirror.createMirror(s.data); renderTree(); log(`Restored ${last.name}`,'ok') } } }catch(e){ log('Auto-restore failed: '+e,'warn') } })();
-
-// =============== Offline Chat (no network) ===============
-const chatEl = $("chat");
-function pushChat(role, content){ const div=document.createElement('div'); const bubble=document.createElement('div'); bubble.className='bubble'+(role==='user'?' me':''); bubble.textContent=content; div.appendChild(bubble); chatEl.appendChild(div); chatEl.scrollTop=chatEl.scrollHeight }
-function aiReply(text){ pushChat('ai', text); memory.add({role:'assistant', content:text}); saveMemory() }
-function saveMemory(){ try{ localStorage.setItem('ai_memory_snapshot', memory.snapshot()) }catch{} }
-
-// Offline tool functions understood by the AI stub
-async function tool_list_files(path){ const root=virtualMirror.getVirtualStructure(); const out=[]; function walk(obj, base=''){ Object.entries(obj).forEach(([n,c])=>{ const p= base?`${base}/${n}`:n; const isDir=typeof c==='object'&&c!==null; if(!path || p.startsWith(path)){ out.push({path:p, isDirectory:isDir}) } if(isDir) walk(c,p) }) } walk(root,''); return out }
-async function tool_read_file(path){ const c=virtualMirror.getVirtualFile(path); if(c===null) throw new Error('not found'); return c }
-async function tool_write_file(path, content){ virtualMirror.setVirtualFile(path, content); log(`virtual write: ${path}`,'ok'); renderTree(); if(state.activePath===path) editorEl.value=content; return {ok:true} }
-async function tool_create_dir(path){ // create empty dir holder
- function ensure(vp){ if(!virtualMirror.mirror[vp]) virtualMirror.mirror[vp]={} }
- const parts=path.split('/').filter(Boolean); let acc=''; for(const p of parts){ acc = acc? `${acc}/${p}`: p; ensure(acc) } renderTree(); return {ok:true}
-}
-async function tool_delete_file(path){ if(virtualMirror.mirror[path]!==undefined){ delete virtualMirror.mirror[path]; renderTree(); return {ok:true} } throw new Error('not found') }
-
-// Extremely small, deterministic offline "LLM" that parses imperative commands
-async function offlineAI(userText){
-  // Remember user message
-  memory.add({role:'user', content:userText}); saveMemory();
-  // Simple command grammar:
-  // create <path> -> <content>
-  // update <path> -> <content>
-  // read <path>
-  // list [path]
-  // mkdir <path>
-  // delete <path>
-  const txt=userText.trim();
-  try{
-    if(/^list(\s+.*)?$/i.test(txt)){
-      const m = txt.match(/^list\s+(.*)$/i); const path = m? m[1].trim(): '';
-      const files = await tool_list_files(path);
-      return `Files${path? ' under '+path:''}:\n`+ files.map(f=>`- ${f.isDirectory?'[dir] ':'[file]'}${f.path}`).join('\n');
-    }
-    if(/^read\s+/i.test(txt)){
-      const p=txt.replace(/^read\s+/i,'').trim(); const c = await tool_read_file(p); return `\u2192 ${p}\n\n${c}`;
-    }
-    if(/^mkdir\s+/i.test(txt)){
-      const p=txt.replace(/^mkdir\s+/i,'').trim(); await tool_create_dir(p); return `Created directory: ${p}`;
-    }
-    if(/^delete\s+/i.test(txt)){
-      const p=txt.replace(/^delete\s+/i,'').trim(); await tool_delete_file(p); return `Deleted: ${p}`;
-    }
-    if(/^(create|update)\s+/i.test(txt)){
-      const [_, cmd, rest] = txt.match(/^(create|update)\s+(.+)$/i) || [];
-      if(!rest) throw new Error('Missing path');
-      const parts = rest.split(/\s*->\s*/);
-      const path = parts[0].trim(); const content = parts.slice(1).join('->');
-      if(!content) throw new Error('Missing content. Use: create path -> content');
-      await tool_write_file(path, content);
-      return `${cmd.toLowerCase()==='create'?'Created':'Updated'} ${path}`;
-    }
-    // fallback: helpful tip
-    return `I am offline. Supported commands:\n- list [path]\n- read <path>\n- mkdir <path>\n- create <path> -> <content>\n- update <path> -> <content>\n- delete <path>\nThen use ⬆️ To Local to write to disk.`;
-  }catch(e){ return `Error: ${e.message}` }
-}
-
-// =============== Memory Panel ===============
-function refreshMemory(){ $("memMsgs").textContent = memory.messages.length; $("memFacts").textContent = memory.facts.length; $("memVecs").textContent = memory.vectorDocs.length; $("memStatic").textContent = memory.staticBlocks.length; const prev=document.createDocumentFragment(); const last=(memory.getLLM()||[]).slice(-5); last.forEach(m=>{ const d=document.createElement('div'); d.style.marginBottom='.35rem'; d.innerHTML = `<div style="color:var(--muted)">${escapeHtml(m.role)}</div><pre style="white-space:pre-wrap">${escapeHtml((m.parts?.map(p=>p.text||'').join('')||'').slice(0,300))}</pre>`; prev.appendChild(d) }); const tgt=$("memPreview"); tgt.innerHTML=''; tgt.appendChild(prev) }
-$("memRefresh").onclick=refreshMemory; $("memExport").onclick=()=>{ try{ const snap=memory.snapshot(); navigator.clipboard?.writeText(snap); log('Memory exported to clipboard','ok') }catch(e){ log('Export failed: '+e,'err') } };
-$("memImport").onclick=()=>{ const s=prompt('Paste memory snapshot JSON:'); if(!s) return; try{ memory.load(s); saveMemory(); refreshMemory(); log('Memory imported','ok') }catch(e){ log('Import failed','err') } };
-$("memClear").onclick=()=>{ memory.clear(); saveMemory(); refreshMemory(); log('Memory cleared','warn') };
-
-// =============== Boot ===============
-(function boot(){
-  // start with an empty virtual FS; if in local mode restore already ran
-  renderTree(); renderTabs(); refreshMemory(); editorEl.disabled = true;
-  pushChat('ai','Hello! I\'m fully offline. No CDNs, no packages, no Vite.\nTry commands like:\n• mkdir src\n• create src/hello.txt -> Hello from Vanilla IDE\n• list src\n• read src/hello.txt\nUse the ⬆️ To Local button to persist files to your disk.');
-})();
-
-// node server.js
-const http = require("http");
-const { request } = require("https");
-
-const PORT = 8787;
-const GEMINI_KEY = process.env.GEMINI_KEY; // set in your shell
-const MODEL = "gemini-2.0-flash";
-
-const server = http.createServer((req, res) => {
-  if (req.method === "OPTIONS") { // CORS preflight
-    res.writeHead(204, cors());
-    return res.end();
-  }
-
-  if (req.url === "/api/generate" && req.method === "POST") {
-    let body = "";
-    req.on("data", chunk => (body += chunk));
-    req.on("end", () => {
-      const outReq = request(
-        `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`,
-        { method: "POST", headers: { "Content-Type": "application/json" } },
-        outRes => {
-          let out = "";
-          outRes.on("data", d => (out += d));
-          outRes.on("end", () => {
-            res.writeHead(200, { ...cors(), "Content-Type": "application/json" });
-            res.end(out);
-          });
-        }
-      );
-      outReq.on("error", (e) => {
-        res.writeHead(500, { ...cors(), "Content-Type": "text/plain" });
-        res.end(String(e));
-      });
-      outReq.write(body);
-      outReq.end();
-    });
-    return;
-  }
-
-  res.writeHead(404, cors());
-  res.end("Not found");
-});
-
-function cors() {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type"
-  };
-}
-
-server.listen(PORT, () =>
-  console.log(`Proxy listening http://localhost:${PORT}`)
-);
-
+$('#send').onclick=send;
+addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='enter'){e.preventDefault();send()}});
+CLR.onclick=()=>{mem.clear();add('bot','🧹 Memory cleared.')};
 </script>
-</body>
-</html>
