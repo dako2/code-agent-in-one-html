@@ -1,0 +1,5 @@
+{
+  "name": "AI Code Companion",
+  "description": "An AI-powered code editor with a custom cursor that generates and completes code snippets using the Gemini API, simulating a futuristic coding assistant.",
+  "requestFramePermissions": []
+}
