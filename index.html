@@ -1,67 +1,79 @@
-<!doctype html><meta charset="utf-8"><title>Gemini 2.5 — Mini Editor + Memory</title><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-:root{--b:#e5e7eb;--mut:#6b7280}*{box-sizing:border-box}html,body{height:100%}
-body{margin:0;font:13px ui-monospace,monospace;display:flex;flex-direction:column}
-header{display:flex;gap:.5rem;align-items:center;padding:.5rem;border-bottom:1px solid var(--b);background:#fafafa;flex-wrap:wrap}
-input,button,textarea{border:1px solid var(--b);background:#fff;border-radius:6px;padding:.35rem .55rem}
-button{cursor:pointer}button:hover{background:#f3f4f6}label{display:flex;align-items:center;gap:.35rem}
-#wrap{flex:1;display:grid;grid-template-rows:1fr 35vh}
-#editor{border:0;border-bottom:1px solid var(--b);padding:10px;resize:none;outline:none}
-#chatbox{display:flex;flex-direction:column;overflow:hidden}#chat{flex:1;overflow:auto;padding:8px}
-#prompt{min-height:60px;resize:vertical}
-.m{margin:.35rem 0;padding:.45rem .6rem;border:1px solid var(--b);border-radius:8px;white-space:pre-wrap;word-break:break-word}
-.me{background:#eef4ff}.bot{background:#f6fff2}.err{background:#fff1f2}small{color:var(--mut)}
-</style>
-<header>
-  <input id="key" type="password" placeholder="Google AI API Key" style="min-width:240px">
-  <button id="send">Send</button>
-  <label><input id="memOn" type="checkbox" checked>🧠 Memory <small id="memStat">(0)</small></label>
-  <button id="clearMem" title="/clear-mem does the same">Clear Mem</button>
-  <small>⌘/Ctrl+Enter • sessionStorage</small>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Gemini Agent</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>body,html{height:100%;margin:0;font:13px monospace;display:flex;flex-direction:column}*{box-sizing:border-box}button,input,textarea{border:1px solid #e5e7eb;background:#fff;border-radius:6px;padding:.35rem .55rem;font:inherit}button{cursor:pointer}label{display:flex;align-items:center;gap:.35rem}.m{margin:.35rem 0;padding:.45rem .6rem;border:1px solid #e5e7eb;border-radius:8px;white-space:pre-wrap;word-break:break-word}a{color:#2563eb}</style>
+</head>
+<body style="font-family:ui-monospace,monospace">
+
+<header style="display:flex;gap:.5rem;align-items:center;padding:.5rem;border-bottom:1px solid #e5e7eb;background:#fafafa;flex-wrap:wrap">
+  <input id="k" type="password" placeholder="Google AI API Key" style="min-width:240px">
+  <button id="S">Send</button>
+  <label><input id="mo" type="checkbox" checked>🧠<small id="ms">(0)</small></label>
+  <button id="C">Clear</button>
+  <input type="file" id="fi" style="display:none">
+  <button id="L">Load</button>
+  <textarea id="s" style="width:100%;margin-top:5px;height:40px;resize:vertical">You are a coding assistant. Wrap final code in a markdown block like ```language\n...code...\n```</textarea>
 </header>
-<div id="wrap">
-  <textarea id="editor" placeholder="Paste or write code here…" spellcheck="false"></textarea>
-  <div id="chatbox">
-    <div id="chat"><div class="m">Paste your key, then ask. Commands: <b>/remember fact</b>, <b>/mem</b>, <b>/clear-mem</b>.</div></div>
-    <textarea id="prompt" placeholder="Ask Gemini 2.5 Flash about your code…"></textarea>
+
+<div style="flex:1;display:grid;grid-template-rows:1fr 35vh;overflow:hidden">
+  <textarea id="e" placeholder="Generated code will appear here…" spellcheck="false" style="border:0;border-bottom:1px solid #e5e7eb;padding:10px;resize:none;outline:none"></textarea>
+  <div style="display:flex;flex-direction:column;overflow:hidden">
+    <div id="c" style="flex:1;overflow:auto;padding:8px"></div>
+    <textarea id="p" placeholder="Ask Gemini to write or modify code…" style="min-height:60px;resize:vertical;border-bottom:0;border-radius:6px 6px 0 0"></textarea>
+    <div style="padding:.25rem .6rem;text-align:right;font-size:11px;color:#6b7280;background:#fafafa;border-top:1px solid #e5e7eb;border-radius:0 0 6px 6px">⌘/Ctrl+Enter</div>
   </div>
 </div>
+
 <script type="module">
 import { GoogleGenerativeAI as G } from 'https://esm.run/@google/generative-ai';
-const $=q=>document.querySelector(q),K=$('#key'),E=$('#editor'),P=$('#prompt'),C=$('#chat'),ON=$('#memOn'),S=$('#memStat'),CLR=$('#clearMem'),MK='mini_mem_v1';
-K.value=sessionStorage.getItem('g_api_key')||'';K.oninput=()=>sessionStorage.setItem('g_api_key',K.value.trim());
-const add=(cls,t)=>{const d=document.createElement('div');d.className=`m ${cls}`;d.textContent=t;C.appendChild(d);C.scrollTop=C.scrollHeight};
-class M{constructor(){const j=sessionStorage.getItem(MK);const x=j?JSON.parse(j):{facts:[],turns:[]};this.facts=x.facts;this.turns=x.turns;this.keep=20}
- save(){sessionStorage.setItem(MK,JSON.stringify({facts:this.facts,turns:this.turns.slice(-this.keep)}));S.textContent=`(${this.facts.length+this.turns.length})`}
- clear(){this.facts=[];this.turns=[];this.save()}
- fact(t){t=t.trim();if(t)this.facts.push(t),this.save()}
- turn(q,a){this.turns.push({q,a,ts:Date.now()});this.save()}
- recall(b=4000){const p=[];if(this.facts.length)p.push('FACTS:\n'+this.facts.map(f=>'- '+f).join('\n'));let u=p.join('\n\n').length;
- for(let i=Math.max(0,this.turns.length-this.keep);i<this.turns.length;i++){const t=this.turns[i],blk=`Q: ${t.q}\nA: ${t.a}`;if(u+blk.length+2>b)break;p.push(blk);u+=blk.length+2}
- return p.join('\n\n')}
-}
-const mem=new M();mem.save();
-const MODEL='gemini-2.5-flash';
-async function ask(q){
-  const k=K.value.trim(); if(!k) throw new Error('API key required.');
-  const m=new G(k).getGenerativeModel({model:MODEL});
-  const txt=`You are a concise coding assistant.\n\nCONTEXT:\n---\n${E.value.slice(0,12000)}\n---\n\nMEMORY:\n---\n${mem.recall(4000)||'(none)'}\n---\n\nQUESTION:\n${q}`;
-  const r=await m.generateContent({contents:[{role:'user',parts:[{text:txt}]}],generationConfig:{temperature:.3}});
-  return r?.response?.text()||'(no response)';
-}
-function cmd(q){
-  if(q.startsWith('/remember ')) return mem.fact(q.slice(10)),add('bot','✅ Remembered.'),1;
-  if(q==='/mem') return add('bot',mem.recall(8000)||'(empty)'),1;
-  if(q==='/clear-mem') return mem.clear(),add('bot','🧹 Memory cleared.'),1;
-}
-async function send(){
-  const q=P.value.trim(); if(!q) return;
-  add('me',q); P.value='';
-  if(cmd(q)) return;
-  try{const a=await ask(q); add('bot',a); if(ON.checked) mem.turn(q,a)}
-  catch(e){add('err',e?.message||'Request failed')}
-}
-$('#send').onclick=send;
-addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='enter'){e.preventDefault();send()}});
-CLR.onclick=()=>{mem.clear();add('bot','🧹 Memory cleared.')};
+const $ = q => document.querySelector(q);
+const K = 'g_mem_v2';
+const A = (c, t, h) => {
+  const d=document.createElement('div');
+  d.className=`m ${c}`;
+  d[h?'innerHTML':'textContent']=t;
+  $('#c').appendChild(d);
+  $('#c').scrollTop = $('#c').scrollHeight;
+};
+const m = {
+  f:[],t:[],
+  sv(){sessionStorage.setItem(K,JSON.stringify({f:this.f,t:this.t.slice(-20)}));$('#ms').textContent=`(${this.f.length+this.t.length})`},
+  cl(){this.f=[];this.t=[];this.sv()},
+  ad(t){(t=t.trim())&&this.f.push(t);this.sv()},
+  rc(b=4e3){let p=this.f.length?['FACTS:\n'+this.f.map(f=>`- ${f}`).join('\n')]:[],u=p.join('\n\n').length;for(const t of this.t){const s=`Q: ${t.q}\nA: ${t.a}`;if(u+s.length>b)break;p.push(s);u+=s.length}return p.join('\n\n')}
+};
+const S = async () => {
+  const q = $('#p').value.trim();
+  if (!q) return;
+  A('me', q);
+  $('#p').value = '';
+  if (q.startsWith('/remember ')){return m.ad(q.slice(10)),A('bot','✅ Remembered.')}
+  if (q==='/mem'){return A('bot',m.rc(8e3)||'(empty)')}
+  if (q==='/clear-mem'){return m.cl(),A('bot','🧹 Cleared.')}
+  try {
+    const k=$('#k').value.trim(); if(!k)throw new Error('API key required.');
+    const model=new G(k).getGenerativeModel({model:'gemini-2.5-flash'});
+    const T=`${$('#s').value}\n\nCONTEXT:\n---\n${$('#e').value.slice(0,12e3)}\n---\n\nMEMORY:\n---\n${m.rc()||'(none)'}\n---\n\nQUESTION:\n${q}`;
+    const r=await model.generateContent({contents:[{role:'user',parts:[{text:T}]}],generationConfig:{temperature:.3}});
+    const a=r?.response?.text()||'(no response)';
+    A('bot',a);
+    const c=a.match(/```(?:[a-z]+\n)?([\s\S]*?)```/);
+    if(c&&c[1]) $('#e').value=c[1].trim();
+    if($('#mo').checked) m.t.push({q,a}),m.sv();
+  } catch(e) { A('err',e?.message||'Request failed') }
+};
+const l=JSON.parse(sessionStorage.getItem(K)||"{}");m.f=l.f||[];m.t=l.t||[];m.sv();
+$('#k').value=sessionStorage.getItem('g_api_key')||'';
+$('#k').oninput=()=>sessionStorage.setItem('g_api_key',$('#k').value.trim());
+$('#S').onclick=S;
+$('#C').onclick=()=>{m.cl();A('bot','🧹 Cleared.')};
+$('#L').onclick=()=>$('#fi').click();
+$('#fi').onchange=e=>{const f=e.target.files[0];if(f){const r=new FileReader();r.onload=e=>{$('#e').value=e.target.result;A('bot',`✅ Loaded: ${f.name}`)};r.readAsText(f)}};
+addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){e.preventDefault();S()}});
+A('bot','API key from <a href="https://aistudio.google.com/app/apikey" target="_blank">aistudio.google.com</a>',true);
 </script>
+</body>
+</html>

@@ -1,5 +1,0 @@
-{
-  "name": "Gemini AI Code Assistant",
-  "description": "An AI-powered coding tool interface, similar to Cursor, that allows users to edit code and chat with an AI assistant for help and suggestions. The AI has context of the code currently being edited.",
-  "requestFramePermissions": []
-}
